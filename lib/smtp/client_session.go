@@ -1,46 +1,54 @@
 package smtp
 
 import (
-	"errors"
 	"fmt"
 	"net"
-	"strings"
 )
 
 type ClientSession struct {
-	conn *Connection
+	conn     *Connection
+	hostname string
 }
 
-func NewClientSession(netConn net.Conn) *ClientSession {
+func NewClientSession(netConn net.Conn, hostname string) *ClientSession {
 	return &ClientSession{
-		conn: NewConnection(netConn, ClientSide),
+		conn:     NewConnection(netConn, ClientSide),
+		hostname: hostname,
 	}
 }
 
 func (s *ClientSession) SendMail(mail *MailTransaction) error {
-	if _, err := s.conn.Read(); err != nil {
+	if code, _, err := s.conn.ReadReply(); err != nil {
 		return err
+	} else if code != int(CodeReady) {
+		return fmt.Errorf("Did not receive greeting code on greeting: %d", code)
 	}
 
-	if err := s.conn.SendCommand(ExtendedHelloCmd, "localhost"); err != nil {
+	if err := s.conn.SendCommand(HelloCmd, s.hostname); err != nil {
 		return err
 	}
-	if _, err := s.conn.Read(); err != nil {
+	if code, _, err := s.conn.ReadReply(); err != nil {
 		return err
+	} else if code != int(CodeOK) {
+		return fmt.Errorf("Got non OK code for %s: %d", ExtendedHelloCmd, code)
 	}
 
 	if err := s.conn.SendCommand(MailCmd, fmt.Sprintf("FROM:%s", mail.From)); err != nil {
 		return err
 	}
-	if _, err := s.conn.Read(); err != nil {
+	if code, _, err := s.conn.ReadReply(); err != nil {
 		return err
+	} else if code != int(CodeOK) {
+		return fmt.Errorf("Got non OK code for %s: %d", MailCmd, code)
 	}
 
 	if err := s.conn.SendCommand(RecipientCmd, fmt.Sprintf("TO:%s", *mail.To)); err != nil {
 		return err
 	}
-	if _, err := s.conn.Read(); err != nil {
+	if code, _, err := s.conn.ReadReply(); err != nil {
 		return err
+	} else if code != int(CodeOK) {
+		return fmt.Errorf("Got non OK code for %s: %d", RecipientCmd, code)
 	}
 
 	if err := s.conn.SendCommand(DataCmd, ""); err != nil {
@@ -58,15 +66,15 @@ func (s *ClientSession) SendMail(mail *MailTransaction) error {
 		}
 	}
 
-	if err := s.conn.sendRaw("\r\n.\r\n"); err != nil {
+	if err := s.conn.sendRaw("."); err != nil {
 		return err
 	}
-	dataReply, err := s.conn.Read()
+	code, lines, err := s.conn.ReadReply()
 	if err != nil {
 		return err
 	}
-	if !strings.HasPrefix(dataReply, fmt.Sprintf("%d", CodeOK)) {
-		return errors.New("Got non OK status code: " + dataReply)
+	if code != int(CodeOK) {
+		return fmt.Errorf("Got non OK status code: %d\n%v\n", code, lines)
 	}
 
 	s.Quit()

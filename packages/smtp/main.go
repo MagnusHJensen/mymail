@@ -6,14 +6,16 @@ import (
 )
 
 func main() {
-	listener, err := net.Listen("tcp", ":2525")
+	cfg := LoadConfig()
+
+	listener, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
 		panic(err)
 	}
 	defer listener.Close()
 
-	fmt.Printf("SMTP Server listening on port 2525\n")
+	fmt.Printf("SMTP Server listening on %s\n", cfg.ListenAddr)
 
-	server := NewSMTPServer(listener)
+	server := NewSMTPServer(listener, cfg)
 	server.Start()
 }

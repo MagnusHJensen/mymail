@@ -7,7 +7,8 @@ import (
 )
 
 type ServerSession struct {
-	conn *Connection
+	conn     *Connection
+	hostname string
 
 	state    ServerSessionState
 	activeTx *MailTransaction
@@ -25,11 +26,12 @@ const (
 	ServerSessionReady
 )
 
-func NewServerSession(netConn net.Conn, handler ServerSessionHandler) *ServerSession {
+func NewServerSession(netConn net.Conn, handler ServerSessionHandler, hostname string) *ServerSession {
 	return &ServerSession{
-		conn:    NewConnection(netConn, ServerSide),
-		state:   ServerSessionFresh,
-		handler: handler,
+		conn:     NewConnection(netConn, ServerSide),
+		hostname: hostname,
+		state:    ServerSessionFresh,
+		handler:  handler,
 	}
 }
 
@@ -90,6 +92,10 @@ func (s *ServerSession) handleCommand(line string) error {
 		s.activeTx = &MailTransaction{
 			From: from,
 		}
+		if s.activeTx.GetFromHostname() != s.hostname {
+			return s.conn.Send(CodeActionNotTaken)
+		}
+
 		return s.conn.Send(CodeOK)
 	case "RCPT":
 		if len(parts) < 2 {
@@ -139,7 +145,7 @@ func (s *ServerSession) handleCommand(line string) error {
 }
 
 func (s *ServerSession) greet() error {
-	return s.conn.SendWithArgs(CodeReady, "localhost")
+	return s.conn.SendWithArgs(CodeReady, s.hostname)
 }
 
 func (s *ServerSession) shuttingDown() {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 )
 
@@ -36,9 +37,25 @@ func (c *Connection) Read() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed reading data: %w", err)
 	}
-	line = strings.TrimRight(line, "\r\n")
+	line = strings.TrimSuffix(line, "\r\n")
 	c.logReceive(line)
 	return line, nil
+}
+
+func (c *Connection) ReadReply() (code int, lines []string, err error) {
+	for {
+		line, err := c.Read()
+		if err != nil {
+			return 0, nil, err
+		}
+		parsedCode, err := strconv.ParseInt(line[:3], 10, 32)
+		code = int(parsedCode)
+		lines = append(lines, line)
+		if len(line) < 4 || line[3] != '-' {
+			// terminate
+			return code, lines, nil
+		}
+	}
 }
 
 func (c *Connection) Send(code Code) error {

@@ -16,5 +16,6 @@ const (
 	CodeSyntaxError       Code = 500
 	CodeNotImplemented    Code = 502
 	CodeBadSequence       Code = 503
+	CodeActionNotTaken    Code = 550
 	CodeTransactionFailed Code = 554
 )

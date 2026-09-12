@@ -11,4 +11,10 @@ const (
 	DataCmd      Command = "DATA"
 
 	QuitCmd Command = "QUIT"
+
+	// Extension specific commands
+
+	// STARTTLS
+	// https://datatracker.ietf.org/doc/html/rfc3207
+	StartTLSCmd Command = "STARTTLS"
 )

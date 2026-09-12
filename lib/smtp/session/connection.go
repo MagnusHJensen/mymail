@@ -1,18 +1,19 @@
-package smtp
+package session
 
 import (
 	"bufio"
+	"crypto/tls"
 	"fmt"
 	"net"
-	"strconv"
 	"strings"
 )
 
 // Connection represents a base over the wire SMTP connection, and provides
 // low-level utilities to send and read commands.
 type Connection struct {
-	net    net.Conn
-	reader *bufio.Reader
+	net                net.Conn
+	reader             *bufio.Reader
+	isTLSSessionActive bool
 
 	side Side
 }
@@ -35,39 +36,11 @@ func NewConnection(net net.Conn, side Side) *Connection {
 func (c *Connection) Read() (string, error) {
 	line, err := c.reader.ReadString('\n')
 	if err != nil {
-		return "", fmt.Errorf("failed reading data: %w", err)
+		return line, fmt.Errorf("failed reading data: %w", err)
 	}
 	line = strings.TrimSuffix(line, "\r\n")
 	c.logReceive(line)
 	return line, nil
-}
-
-func (c *Connection) ReadReply() (code int, lines []string, err error) {
-	for {
-		line, err := c.Read()
-		if err != nil {
-			return 0, nil, err
-		}
-		parsedCode, err := strconv.ParseInt(line[:3], 10, 32)
-		code = int(parsedCode)
-		lines = append(lines, line)
-		if len(line) < 4 || line[3] != '-' {
-			// terminate
-			return code, lines, nil
-		}
-	}
-}
-
-func (c *Connection) Send(code Code) error {
-	return c.sendRaw(fmt.Sprintf("%d", code))
-}
-
-func (c *Connection) SendWithArgs(code Code, args string) error {
-	return c.sendRaw(fmt.Sprintf("%d %s", code, args))
-}
-
-func (c *Connection) SendCommand(cmd Command, args string) error {
-	return c.sendRaw(fmt.Sprintf("%s %s", string(cmd), args))
 }
 
 func (c *Connection) sendRaw(cmd string) error {
@@ -93,4 +66,17 @@ func (c *Connection) logReceive(msg string) {
 	} else {
 		fmt.Printf("C: %s\n", msg)
 	}
+}
+
+func (c *Connection) UpgradeToTLS() {
+	// Wrap the current connection with a TLS client
+	tlsClient := tls.Client(c.net, &tls.Config{
+		InsecureSkipVerify: true, // TODO: Configure ServerName with the MX hostname
+	})
+	if err := tlsClient.Handshake(); err != nil {
+		panic(err)
+	}
+	c.net = tlsClient
+	c.reader = bufio.NewReader(c.net)
+	c.isTLSSessionActive = true
 }

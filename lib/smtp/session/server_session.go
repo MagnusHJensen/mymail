@@ -1,9 +1,11 @@
-package smtp
+package session
 
 import (
 	"fmt"
 	"net"
 	"strings"
+
+	"dk.magnusjensen/mymail/lib/smtp"
 )
 
 type ServerSession struct {
@@ -11,12 +13,12 @@ type ServerSession struct {
 	hostname string
 
 	state    ServerSessionState
-	activeTx *MailTransaction
+	activeTx *smtp.MailTransaction
 	handler  ServerSessionHandler
 }
 
 type ServerSessionHandler interface {
-	QueueMail(mail *MailTransaction) error
+	QueueMail(mail *smtp.MailTransaction) error
 }
 
 type ServerSessionState int
@@ -71,16 +73,16 @@ func (s *ServerSession) handleCommand(line string) error {
 	parts := strings.SplitN(line, " ", 3)
 
 	cmd := strings.ToUpper(parts[0])
-	switch Command(cmd) {
-	case ExtendedHelloCmd, HelloCmd:
+	switch smtp.Command(cmd) {
+	case smtp.ExtendedHelloCmd, smtp.HelloCmd:
 		// After hello, move to ready
 		s.state = ServerSessionReady
-		return s.conn.Send(CodeOK)
+		return s.Reply(smtp.CodeOK, s.hostname)
 	case "QUIT":
-		return s.conn.SendWithArgs(CodeShuttingDown, "localhost Service closing transmission channel")
+		return s.Reply(smtp.CodeShuttingDown, "localhost Service closing transmission channel")
 	case "MAIL":
 		if len(parts) < 2 {
-			return s.conn.SendWithArgs(CodeSyntaxError, "MAIL command requires FROM argument")
+			return s.Reply(smtp.CodeSyntaxError, "MAIL command requires FROM argument")
 		}
 
 		/* if !conn.canReceiveMail() {
@@ -89,30 +91,30 @@ func (s *ServerSession) handleCommand(line string) error {
 		} */
 
 		from := strings.SplitN(parts[1], ":", 2)[1]
-		s.activeTx = &MailTransaction{
+		s.activeTx = &smtp.MailTransaction{
 			From: from,
 		}
-		if s.activeTx.GetFromHostname() != s.hostname {
-			return s.conn.Send(CodeActionNotTaken)
-		}
+		/* if s.activeTx.GetFromHostname() != s.hostname {
+			return s.Reply(CodeActionNotTaken)
+		} */
 
-		return s.conn.Send(CodeOK)
+		return s.Reply(smtp.CodeOK, "")
 	case "RCPT":
 		if len(parts) < 2 {
-			return s.conn.SendWithArgs(CodeSyntaxError, "MAIL command requires TO argument")
+			return s.Reply(smtp.CodeSyntaxError, "MAIL command requires TO argument")
 		}
 
 		if s.activeTx == nil {
-			return s.conn.SendWithArgs(CodeBadSequence, "RCPT requires starting a sequence via MAIL first")
+			return s.Reply(smtp.CodeBadSequence, "RCPT requires starting a sequence via MAIL first")
 		}
 
 		to := strings.SplitN(parts[1], ":", 2)[1]
 		s.activeTx.To = &to
 
-		return s.conn.Send(CodeOK)
+		return s.Reply(smtp.CodeOK, "")
 	case "DATA":
 		// TODO: Error
-		s.conn.SendWithArgs(CodeStartData, "Start mail input; end with <CRLF>.<CRLF>")
+		s.Reply(smtp.CodeStartData, "Start mail input; end with <CRLF>.<CRLF>")
 
 		// Keep reading each incoming line (terminated by CRLF) until we hit a line with <CRLF>.<CRLF>
 		lines := []string{}
@@ -133,11 +135,11 @@ func (s *ServerSession) handleCommand(line string) error {
 		pendingMail := s.activeTx
 		s.activeTx = nil
 		if err := s.handler.QueueMail(pendingMail); err != nil {
-			return s.conn.Send(CodeTransactionFailed)
+			return s.Reply(smtp.CodeTransactionFailed, "")
 		}
-		return s.conn.Send(CodeOK)
+		return s.Reply(smtp.CodeOK, "")
 	default:
-		if err := s.conn.Send(CodeNotImplemented); err != nil {
+		if err := s.Reply(smtp.CodeNotImplemented, ""); err != nil {
 			return err
 		}
 		return fmt.Errorf("Command %q is not supported", cmd)
@@ -145,11 +147,15 @@ func (s *ServerSession) handleCommand(line string) error {
 }
 
 func (s *ServerSession) greet() error {
-	return s.conn.SendWithArgs(CodeReady, s.hostname)
+	return s.Reply(smtp.CodeReady, s.hostname)
 }
 
 func (s *ServerSession) shuttingDown() {
-	if err := s.conn.Send(CodeShuttingDown); err != nil {
+	if err := s.Reply(smtp.CodeShuttingDown, s.hostname); err != nil {
 		fmt.Printf("Failed to send shutting down: %v\n", err)
 	}
+}
+
+func (c *ServerSession) Reply(code smtp.Code, args string) error {
+	return c.conn.sendRaw(fmt.Sprintf("%d %s", code, args))
 }

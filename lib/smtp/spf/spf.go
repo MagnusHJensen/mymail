@@ -51,7 +51,14 @@ func VerifySPFHost(fromIP string, host string) (Result, error) {
 		return PermanentErrorResult, errors.New("More than one SPF record observed")
 	}
 
-	spfRecord := ParseRecord(spfRecords[0])
+	spfRecord, err := ParseRecord(spfRecords[0])
+	if err != nil {
+		// Permanent failure on parse.
+		// TODO? Custom error with result type
+		return PermanentErrorResult, nil
+	}
+
+	parsedFromIP := net.ParseIP(fromIP)
 
 	for _, term := range spfRecord.DirectiveTerms {
 		// Check and return based on result
@@ -60,17 +67,22 @@ func VerifySPFHost(fromIP string, host string) (Result, error) {
 			return mapQualifierToResult(term.qualifier), nil
 		}
 
-		if term.mechanism != nil && term.mechanism.mechanismType == IP4MechanismType {
-			// the IP put in may or may not contain a CIDR range, if not default to /32
-			parsedFromIP := net.ParseIP(fromIP)
+		if term.mechanism != nil && (term.mechanism.mechanismType == IP4MechanismType || term.mechanism.mechanismType == IP6MechanismType) {
 
-			// TODO: can panic
+			// the IP put in may or may not contain a CIDR range, if not default to /32 for IP4 and /128 for IP6
 			spfIP := *term.mechanism.value
 			if !strings.Contains(spfIP, "/") {
-				// does not contain a CIDR range, default to /32
-				spfIP += fmt.Sprintf("/32")
+				if term.mechanism.mechanismType == IP4MechanismType {
+					// does not contain a CIDR range, default to /32
+					spfIP += "/32"
+				} else {
+					spfIP += "/128"
+				}
 			}
-			_, netRange, _ := net.ParseCIDR(spfIP)
+			_, netRange, err := net.ParseCIDR(spfIP)
+			if err != nil {
+				return PermanentErrorResult, nil
+			}
 
 			if netRange.Contains(parsedFromIP) {
 				// Only if we match do we return the pass/fail result, else if no match go onto the next term.
@@ -79,7 +91,8 @@ func VerifySPFHost(fromIP string, host string) (Result, error) {
 		}
 	}
 
-	return NoneResult, nil
+	// Neutral if we fall through without any matches on terms
+	return NeutralResult, nil
 }
 
 func mapQualifierToResult(qualifier byte) Result {

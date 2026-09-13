@@ -18,7 +18,7 @@ import (
 )
 
 type AuthService interface {
-	FindUser(username string) *User
+	AuthUser(username, password string) *User
 }
 
 type smtpServer struct {
@@ -225,13 +225,8 @@ func (s *smtpServer) readLocalPendingMails() (map[string]*smtp.MailTransaction, 
 }
 
 func (s *smtpServer) AuthenticateUser(username, password string) error {
-	user := s.authSvc.FindUser(username)
+	user := s.authSvc.AuthUser(username, password)
 	if user == nil {
-		return errors.New("Incorrect username or password")
-	}
-
-	isCorrectPass := user.IsCorrectPassword(password)
-	if !isCorrectPass {
 		return errors.New("Incorrect username or password")
 	}
 

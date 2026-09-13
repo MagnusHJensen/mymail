@@ -36,10 +36,10 @@ func TestConnectionRead(t *testing.T) {
 		}()
 
 		// client read, reads a single line
-		line, err := connection.Read()
+		line, err := connection.Read(1000)
 		require.NoError(t, err)
 		require.Equal(t, "First line", line)
-		line, err = connection.Read()
+		line, err = connection.Read(1000)
 		require.NoError(t, err)
 		require.Equal(t, "Second line", line)
 	})
@@ -53,14 +53,29 @@ func TestConnectionRead(t *testing.T) {
 		go func() {
 			_, err := io.WriteString(server, "Multi")
 			require.NoError(t, err)
-			_, err = io.WriteString(server, "Line")
+			_, err = io.WriteString(server, "Line\n")
 			require.NoError(t, err)
 		}()
 
 		require.NoError(t, client.SetReadDeadline(time.Now().Add(time.Millisecond*100)))
-		line, err := connection.Read()
-		require.Error(t, err, "i/o timeout")
-		require.Equal(t, "MultiLine", line) // We get both writes without CRLF and read timeout.
+		line, err := connection.Read(1000)
+		require.ErrorContains(t, err, "i/o timeout")
+		require.Equal(t, "MultiLine\n", line) // We get both writes without CRLF and read timeout.
+	})
+
+	t.Run("caps message read size", func(t *testing.T) {
+		t.Parallel()
+		connection, client, server := setupConnection()
+		defer client.Close()
+		defer server.Close()
+
+		go func() {
+			io.WriteString(server, "Multi")
+		}()
+
+		line, err := connection.Read(2)
+		require.ErrorContains(t, err, "line exceeds max length")
+		require.Empty(t, line)
 	})
 
 }

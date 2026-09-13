@@ -87,7 +87,7 @@ func (s *ClientSession) SendMail(mail *smtp.MailTransaction) error {
 	if err := s.sendCommand(smtp.DataCmd, ""); err != nil {
 		return err
 	}
-	if _, err := s.conn.Read(); err != nil {
+	if _, _, err := s.ReadReply(); err != nil {
 		return err
 	}
 
@@ -229,12 +229,11 @@ func (s *ClientSession) InitAuth(authLine string) error {
 	}
 
 	s.state = ClientSessionAuthed
-
 	return s.ExtendedHello()
 }
 
 func (s *ClientSession) Mail(mail *smtp.MailTransaction) error {
-	if err := s.sendCommand(smtp.MailCmd, fmt.Sprintf("FROM:<%s>", mail.From)); err != nil {
+	if err := s.sendCommand(smtp.MailCmd, fmt.Sprintf("FROM:<%s>", *mail.To)); err != nil {
 		return err
 	}
 	if code, _, err := s.ReadReply(); err != nil {
@@ -263,9 +262,13 @@ func (s *ClientSession) Quit() {
 	s.conn.net.Close()
 }
 
+// Reply line has a max size of 512 octets
+// https://www.rfc-editor.org/info/rfc5321/#section-4.5.3.1.5
+const MaxReplyLineSize = 512
+
 func (c *ClientSession) ReadReply() (code int, lines []string, err error) {
 	for {
-		line, err := c.conn.Read()
+		line, err := c.conn.Read(MaxReplyLineSize)
 		if err != nil {
 			return 0, nil, err
 		}

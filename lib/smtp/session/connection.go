@@ -26,15 +26,35 @@ func NewConnection(net net.Conn, logger *slog.Logger) *Connection {
 	}
 }
 
-func (c *Connection) Read() (string, error) {
-	line, err := c.reader.ReadString('\n')
-	if err != nil {
-		return line, fmt.Errorf("failed reading data: %w", err)
-	}
-	line = strings.TrimSuffix(line, "\r\n")
-	c.logger.Debug(fmt.Sprintf("received %s", line))
+func (c *Connection) Read(maxSize int) (string, error) {
+	var buf []byte
+	for {
+		b, err := c.reader.ReadByte()
+		if err != nil {
+			return string(buf), err
+		}
+		buf = append(buf, b)
+		if len(buf) > maxSize-2 { // -2 to accomodate for the <CRLF>
+			return "", fmt.Errorf("line exceeds max length of %d bytes", maxSize)
+		}
 
-	return line, nil
+		// After each byte read, peek the next two to see if its a CRLF sequence.
+		nextBytes, err := c.reader.Peek(2)
+		if err != nil {
+			// Whatever we do peek even if not both bytes, store it in the buffer
+			if len(nextBytes) > 0 {
+				buf = append(buf, nextBytes...)
+			}
+			return string(buf), err
+		}
+		if nextBytes[0] == '\r' && nextBytes[1] == '\n' {
+			// no \r\n to trim anymore.
+			// but advance the reader to avoid next read to start with these bytes
+			c.reader.Discard(2)
+			c.logger.Debug(fmt.Sprintf("received %s", string(buf)))
+			return string(buf), nil
+		}
+	}
 }
 
 func (c *Connection) sendRaw(cmd string) error {

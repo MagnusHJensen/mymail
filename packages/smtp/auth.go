@@ -37,13 +37,19 @@ func NewAuthService(logger *slog.Logger, usersFile string) *authService {
 	return svc
 }
 
-func (svc *authService) FindUser(username string) *User {
+func (svc *authService) AuthUser(username, password string) *User {
 	user, ok := svc.users[username]
 	if !ok {
+		// TODO: Timing attack
 		return nil
 	}
 
-	return &user
+	if user.IsCorrectPassword(password) {
+		return &user
+	}
+
+	// TODO: Timing attack
+	return nil
 }
 
 // Returns map of username to user object

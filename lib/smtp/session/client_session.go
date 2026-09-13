@@ -1,25 +1,63 @@
 package session
 
 import (
+	"bufio"
+	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
 
 	"dk.magnusjensen/mymail/lib/smtp"
+	"dk.magnusjensen/mymail/lib/smtp/sasl"
+)
+
+type ClientSessionState int
+
+const (
+	ClientSessionFresh ClientSessionState = iota
+	ClientSessionAuthed
+	ClientSessionReady
 )
 
 type ClientSession struct {
-	conn     *Connection
+	conn   *Connection
+	logger *slog.Logger
+
 	hostname string
+	state    ClientSessionState
+
+	authenticationId string
+	password         string
 }
 
-func NewClientSession(netConn net.Conn, hostname string) *ClientSession {
-	return &ClientSession{
-		conn:     NewConnection(netConn, ClientSide),
-		hostname: hostname,
+type ClientSessionOption func(s *ClientSession)
+
+// Implemented as an option, since our own relay client does not need it, but tooling does
+func WithPlainAuth(authenticationId, password string) ClientSessionOption {
+	return func(s *ClientSession) {
+		s.authenticationId = authenticationId
+		s.password = password
 	}
+}
+
+func NewClientSession(logger *slog.Logger, netConn net.Conn, hostname string, opts ...ClientSessionOption) *ClientSession {
+	clientLogger := logger.With("as", "client")
+	session := &ClientSession{
+		conn:     NewConnection(netConn, clientLogger),
+		logger:   clientLogger,
+		hostname: hostname,
+		state:    ClientSessionFresh,
+	}
+
+	for _, opt := range opts {
+		opt(session)
+	}
+
+	return session
 }
 
 func (s *ClientSession) SendMail(mail *smtp.MailTransaction) error {
@@ -38,25 +76,15 @@ func (s *ClientSession) SendMail(mail *smtp.MailTransaction) error {
 		return fmt.Errorf("Got non OK code for %s: %d", ExtendedHelloCmd, code)
 	} */
 
-	if err := s.SendCommand(smtp.MailCmd, fmt.Sprintf("FROM:%s", mail.From)); err != nil {
+	if err := s.Mail(mail); err != nil {
 		return err
-	}
-	if code, _, err := s.ReadReply(); err != nil {
-		return err
-	} else if code != int(smtp.CodeOK) {
-		return fmt.Errorf("Got non OK code for %s: %d", smtp.MailCmd, code)
 	}
 
-	if err := s.SendCommand(smtp.RecipientCmd, fmt.Sprintf("TO:%s", *mail.To)); err != nil {
+	if err := s.Recipient(mail); err != nil {
 		return err
-	}
-	if code, _, err := s.ReadReply(); err != nil {
-		return err
-	} else if code != int(smtp.CodeOK) {
-		return fmt.Errorf("Got non OK code for %s: %d", smtp.RecipientCmd, code)
 	}
 
-	if err := s.SendCommand(smtp.DataCmd, ""); err != nil {
+	if err := s.sendCommand(smtp.DataCmd, ""); err != nil {
 		return err
 	}
 	if _, err := s.conn.Read(); err != nil {
@@ -96,7 +124,7 @@ func (s *ClientSession) ReadGreeting() error {
 }
 
 func (s *ClientSession) ExtendedHello() error {
-	if err := s.SendCommand(smtp.ExtendedHelloCmd, s.hostname); err != nil {
+	if err := s.sendCommand(smtp.ExtendedHelloCmd, s.hostname); err != nil {
 		return err
 	}
 	code, lines, err := s.ReadReply()
@@ -111,21 +139,32 @@ func (s *ClientSession) ExtendedHello() error {
 
 func (s *ClientSession) handleCapabilities(lines []string) error {
 	for _, line := range lines {
-		if strings.Contains(line, "STARTTLS") {
+		// Always check for TLS first before others.
+		if strings.Contains(line, "STARTTLS") && !s.conn.isTLSSessionActive {
 			return s.StartTLS()
+		}
+
+		if strings.Contains(line, "AUTH") && s.state == ClientSessionFresh {
+			return s.InitAuth(line)
 		}
 	}
 
+	s.logger.Info("ready to send")
+	// we have handled all capabilities, we are now ready
+	s.state = ClientSessionReady
 	return nil
 }
 
+// StartTLS handles the STARTTLS[1] SMTP extension
+//
+// [1] https://datatracker.ietf.org/doc/html/rfc3207
 func (s *ClientSession) StartTLS() error {
-	fmt.Printf("Starting TLS connection\n")
+	s.logger.Info("Starting TLS connection")
 	if s.conn.isTLSSessionActive {
 		return errors.New("TLS connection is already active")
 	}
 
-	if err := s.SendCommand(smtp.StartTLSCmd, ""); err != nil {
+	if err := s.sendCommand(smtp.StartTLSCmd, ""); err != nil {
 		return err
 	}
 	if code, lines, err := s.ReadReply(); err != nil {
@@ -135,13 +174,92 @@ func (s *ClientSession) StartTLS() error {
 	}
 
 	// upgrade the connection to TLS
-	s.conn.UpgradeToTLS()
+	s.UpgradeToTLS()
 	// re-trigger a new HELO OR EHLO
 	return s.ExtendedHello()
 }
 
+// InitAuth handles the AUTH[1] SMTP extension
+//
+// [1] https://datatracker.ietf.org/doc/html/rfc4954
+func (s *ClientSession) InitAuth(authLine string) error {
+	if !s.conn.isTLSSessionActive {
+		return errors.New("AUTH requires an active TLS connection")
+	}
+
+	// Find the first appropriate auth method, should be selected on the most secure.
+	// TODO: Initial implementation supports PLAIN only.
+	var splitLine []string
+	if authLine[3] == '-' {
+		splitLine = strings.SplitN(authLine, "-", 2)
+	} else {
+		// split by space as per the ABNF
+		splitLine = strings.SplitN(authLine, " ", 2)
+	}
+
+	// Now get a list of all available SASL mechanisms the serve supports
+	mechanisms := strings.Split(splitLine[1], " ")
+	// AUTH is the first here, so everything after that
+	var selectedMechanism string
+	for _, mechanism := range mechanisms {
+		if mechanism == sasl.PlainMechanism {
+			selectedMechanism = mechanism
+		}
+	}
+
+	if selectedMechanism == "" {
+		return errors.New("did not find a supported SASL mechanism")
+	}
+
+	if s.authenticationId == "" || s.password == "" {
+		return errors.New("client was not initialized with WithPlainAuth")
+	}
+
+	// TODO: For now we only handle plain
+	authMsg := sasl.PlainAuthMessage(s.authenticationId, s.password)
+	encoded := base64.StdEncoding.EncodeToString([]byte(authMsg))
+
+	if err := s.sendCommand(smtp.AuthCmd, fmt.Sprintf("%s %s", selectedMechanism, encoded)); err != nil {
+		return err
+	}
+	if code, lines, err := s.ReadReply(); err != nil {
+		return err
+	} else if code != 235 { // TODO: Document as const code
+		return fmt.Errorf("received non 235 code for %s: %d\n - %v", smtp.AuthCmd, code, lines)
+	}
+
+	s.state = ClientSessionAuthed
+
+	return s.ExtendedHello()
+}
+
+func (s *ClientSession) Mail(mail *smtp.MailTransaction) error {
+	if err := s.sendCommand(smtp.MailCmd, fmt.Sprintf("FROM:<%s>", mail.From)); err != nil {
+		return err
+	}
+	if code, _, err := s.ReadReply(); err != nil {
+		return err
+	} else if code != int(smtp.CodeOK) {
+		return fmt.Errorf("Got non OK code for %s: %d", smtp.MailCmd, code)
+	}
+
+	return nil
+}
+
+func (s *ClientSession) Recipient(mail *smtp.MailTransaction) error {
+	if err := s.sendCommand(smtp.RecipientCmd, fmt.Sprintf("TO:<%s>", *mail.To)); err != nil {
+		return err
+	}
+	if code, _, err := s.ReadReply(); err != nil {
+		return err
+	} else if code != int(smtp.CodeOK) {
+		return fmt.Errorf("Got non OK code for %s: %d", smtp.RecipientCmd, code)
+	}
+	return nil
+}
+
 func (s *ClientSession) Quit() {
-	s.SendCommand(smtp.QuitCmd, "")
+	s.sendCommand(smtp.QuitCmd, "")
 	s.conn.net.Close()
 }
 
@@ -176,7 +294,7 @@ func (c *ClientSession) ReadReply() (code int, lines []string, err error) {
 //
 // Reply-code     = %x32-35 %x30-35 %x30-39
 func (c *ClientSession) validateReplyLine(line string) error {
-	if len(line) < 5 {
+	if len(line) < 3 {
 		return errors.New("reply line cannot be less than 5 octets - 3 digits and <CRLF>")
 	}
 
@@ -206,6 +324,23 @@ func (c *ClientSession) validateReplyLine(line string) error {
 	return nil
 }
 
-func (c *ClientSession) SendCommand(cmd smtp.Command, args string) error {
-	return c.conn.sendRaw(fmt.Sprintf("%s %s", string(cmd), args))
+func (c *ClientSession) sendCommand(cmd smtp.Command, args string) error {
+	cmdString := string(cmd)
+	if args != "" {
+		cmdString += fmt.Sprintf(" %s", args)
+	}
+	return c.conn.sendRaw(cmdString)
+}
+
+func (c *ClientSession) UpgradeToTLS() {
+	// Wrap the current connection with a TLS client
+	tlsClient := tls.Client(c.conn.net, &tls.Config{
+		InsecureSkipVerify: true, // TODO: Configure ServerName with the MX hostname
+	})
+	if err := tlsClient.Handshake(); err != nil {
+		panic(err)
+	}
+	c.conn.net = tlsClient
+	c.conn.reader = bufio.NewReader(c.conn.net)
+	c.conn.isTLSSessionActive = true
 }

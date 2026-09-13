@@ -1,9 +1,11 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -15,17 +17,27 @@ import (
 	"dk.magnusjensen/mymail/lib/smtp/session"
 )
 
+type AuthService interface {
+	FindUser(username string) *User
+}
+
 type smtpServer struct {
-	listener net.Listener
-	cfg      *Config
+	listener     net.Listener
+	sendListener net.Listener
+	cfg          *Config
+	logger       *slog.Logger
+	authSvc      AuthService
 
 	pendingMails map[string]*smtp.MailTransaction
 }
 
-func NewSMTPServer(listener net.Listener, cfg *Config) *smtpServer {
+func NewSMTPServer(listener net.Listener, sendListener net.Listener, cfg *Config, logger *slog.Logger, authSvc AuthService) *smtpServer {
 	return &smtpServer{
 		listener:     listener,
+		sendListener: sendListener,
 		cfg:          cfg,
+		logger:       logger,
+		authSvc:      authSvc,
 		pendingMails: map[string]*smtp.MailTransaction{},
 	}
 }
@@ -58,11 +70,23 @@ func (s *smtpServer) QueueMail(mail *smtp.MailTransaction) error {
 func (s *smtpServer) Start() {
 	go s.processPendingMail()
 
-	// Block the server with listening for connections
-	s.acceptConnections()
+	// Listen for inbound connections
+	go s.acceptInboundConnections()
+
+	// Block and listen for send connections
+	s.acceptSendConnections()
 }
 
-func (s *smtpServer) acceptConnections() {
+func (s *smtpServer) acceptInboundConnections() {
+	var tlsCert *tls.Certificate
+	if s.cfg.TLSCertFile != "" {
+		cert, err := tls.LoadX509KeyPair(s.cfg.TLSCertFile, s.cfg.TLSKeyFile)
+		if err != nil {
+			fmt.Printf("Failed to load TLS cert: %v\n", err)
+			return
+		}
+		tlsCert = &cert
+	}
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
@@ -70,7 +94,35 @@ func (s *smtpServer) acceptConnections() {
 			continue
 		}
 
-		serverSession := session.NewServerSession(conn, s, s.cfg.Hostname)
+		serverSession := session.NewServerSession(s.logger, conn, s, session.InboundServerType, s.cfg.Hostname)
+		if tlsCert != nil {
+			serverSession.SetTLSCertificate(*tlsCert)
+		}
+		serverSession.Start()
+	}
+}
+
+func (s *smtpServer) acceptSendConnections() {
+	var tlsCert *tls.Certificate
+	if s.cfg.TLSCertFile != "" {
+		cert, err := tls.LoadX509KeyPair(s.cfg.TLSCertFile, s.cfg.TLSKeyFile)
+		if err != nil {
+			fmt.Printf("Failed to load TLS cert: %v\n", err)
+			return
+		}
+		tlsCert = &cert
+	}
+	for {
+		conn, err := s.sendListener.Accept()
+		if err != nil {
+			fmt.Printf("Failed to accept connection: %v\n", err)
+			continue
+		}
+
+		serverSession := session.NewServerSession(s.logger, conn, s, session.SendServerType, s.cfg.Hostname)
+		if tlsCert != nil {
+			serverSession.SetTLSCertificate(*tlsCert)
+		}
 		serverSession.Start()
 	}
 }
@@ -126,7 +178,7 @@ func (s *smtpServer) relay(mail *smtp.MailTransaction, remoteAddr string) error 
 	}
 	defer netConn.Close()
 
-	session := session.NewClientSession(netConn, s.cfg.Hostname)
+	session := session.NewClientSession(s.logger, netConn, s.cfg.Hostname)
 	return session.SendMail(mail)
 }
 
@@ -170,4 +222,18 @@ func (s *smtpServer) readLocalPendingMails() (map[string]*smtp.MailTransaction, 
 	}
 
 	return pendingMails, nil
+}
+
+func (s *smtpServer) AuthenticateUser(username, password string) error {
+	user := s.authSvc.FindUser(username)
+	if user == nil {
+		return errors.New("Incorrect username or password")
+	}
+
+	isCorrectPass := user.IsCorrectPassword(password)
+	if !isCorrectPass {
+		return errors.New("Incorrect username or password")
+	}
+
+	return nil
 }

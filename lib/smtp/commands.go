@@ -17,4 +17,8 @@ const (
 	// STARTTLS
 	// https://datatracker.ietf.org/doc/html/rfc3207
 	StartTLSCmd Command = "STARTTLS"
+
+	// AUTH
+	// https://datatracker.ietf.org/doc/html/rfc4954
+	AuthCmd Command = "AUTH"
 )

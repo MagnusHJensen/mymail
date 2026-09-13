@@ -2,6 +2,7 @@ package session
 
 import (
 	"io"
+	"log/slog"
 	"net"
 	"testing"
 	"time"
@@ -15,7 +16,7 @@ func setupConnection() (*Connection, net.Conn, net.Conn) {
 	conn1.SetDeadline(time.Now().Add(time.Second))
 	conn2.SetDeadline(time.Now().Add(time.Second))
 
-	connection := NewConnection(conn1, ClientSide)
+	connection := NewConnection(conn1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return connection, conn1, conn2
 }
 

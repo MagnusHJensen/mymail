@@ -52,6 +52,11 @@ func (svc *authService) AuthUser(username, password string) *User {
 	return nil
 }
 
+func (svc *authService) IsValidUser(username string) bool {
+	_, ok := svc.users[username]
+	return ok
+}
+
 // Returns map of username to user object
 func loadUsers(usersFile string) map[string]User {
 	fileData, err := os.ReadFile(usersFile)

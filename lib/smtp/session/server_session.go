@@ -14,6 +14,7 @@ import (
 
 	"dk.magnusjensen/mymail/lib/smtp"
 	"dk.magnusjensen/mymail/lib/smtp/sasl"
+	"dk.magnusjensen/mymail/lib/smtp/spf"
 )
 
 type ServerSession struct {
@@ -22,6 +23,10 @@ type ServerSession struct {
 	hostname   string
 	serverType ServerType
 	handler    ServerSessionHandler
+
+	// The IP of the connection trying to deliver this mail
+	// Only used for inbound ATM. to verify SPF
+	connectingIP string
 
 	// tls
 	tlsCertificate tls.Certificate
@@ -37,7 +42,9 @@ type ServerSession struct {
 
 type ServerSessionHandler interface {
 	QueueMail(mail *smtp.MailTransaction) error
+	StoreLocalMail(mail *smtp.MailTransaction, localUser string)
 	AuthenticateUser(username, password string) error
+	IsValidUser(username string) bool
 }
 
 type ServerSessionState int
@@ -56,7 +63,7 @@ const (
 
 var SupportedAuthMechanisms = []string{sasl.PlainMechanism}
 
-func NewServerSession(logger *slog.Logger, netConn net.Conn, handler ServerSessionHandler, serverType ServerType, hostname string) *ServerSession {
+func NewServerSession(logger *slog.Logger, netConn net.Conn, handler ServerSessionHandler, serverType ServerType, hostname string, connectingIP string) *ServerSession {
 	serverLogger := logger.With("as", "server")
 	switch serverType {
 	case InboundServerType:
@@ -66,12 +73,13 @@ func NewServerSession(logger *slog.Logger, netConn net.Conn, handler ServerSessi
 	}
 
 	session := &ServerSession{
-		conn:       NewConnection(netConn, serverLogger),
-		logger:     logger,
-		hostname:   hostname,
-		state:      ServerSessionFresh,
-		handler:    handler,
-		serverType: serverType,
+		conn:         NewConnection(netConn, serverLogger),
+		logger:       logger,
+		hostname:     hostname,
+		state:        ServerSessionFresh,
+		handler:      handler,
+		serverType:   serverType,
+		connectingIP: connectingIP,
 	}
 
 	// Start with a 10 second deadline, the on any read/reply, we extend the deadline with 10 seconds.
@@ -228,6 +236,17 @@ func (s *ServerSession) handleMail(cmdParts []string) error {
 			// block mails from our own domain on the inbound port.
 			return smtp.NewReplyError(smtp.CodeActionNotTaken, "Use the send address (:587) to send mails")
 		}
+
+		// Run SPF validation
+		result, err := spf.VerifySPFHost(s.connectingIP, mailTransaction.GetFromHostname())
+		if err != nil {
+			return err
+		}
+		if result != spf.PassResult {
+			// TODO: Support better results, for now we only allow explicit passes.
+			// 5.7.1
+			return smtp.NewReplyError(smtp.CodeActionNotTaken, "Failed SPF verification")
+		}
 	} else if s.serverType == SendServerType {
 		if mailTransaction.GetFromHostname() != s.hostname {
 			// block mails from other domains on our send port
@@ -266,6 +285,15 @@ func (s *ServerSession) handleRecipient(cmdParts []string) error {
 		return smtp.NewReplyError(smtp.CodeActionNotTaken, "The email account you tried to reach does not exist")
 	}
 
+	if s.activeTx.GetRemoteAddress() == s.hostname {
+		// if it's for us either delivered or attempting to send
+		// verify the user exists
+		// ? Is this the correct approach or should we accept and send a bounce message later?
+		if !s.handler.IsValidUser(s.activeTx.TemporaryTO()) {
+			return smtp.NewReplyError(smtp.CodeActionNotTaken, "mailbox not found")
+		}
+	}
+
 	return s.Reply(smtp.CodeOK, "")
 }
 
@@ -284,22 +312,29 @@ func (s *ServerSession) handleData() error {
 		if err != nil {
 			return err
 		}
-		if terminated {
-			break
-		}
 
-		lines = append(lines, dataLine)
-		currentSize += len(dataLine) + 2 // len(string) is a byte sequence = octets. +2 is from the never returned \r\n.
+		lines = append(lines, dataLine+"\r\n") // Append back <CRLF>
+		currentSize += len(dataLine) + 2       // len(string) is a byte sequence = octets. +2 is from the never returned \r\n.
 
 		if currentSize > 64*1000 { // TODO: Pull into const, and have a more lenient max size, today it's max 64KB
 			s.activeTx = nil
 			return smtp.NewReplyError(smtp.CodeStorageExceeded, "Too much mail data")
 		}
+
+		if terminated {
+			break
+		}
+
 	}
 
 	s.activeTx.Data = lines
 	pendingMail := s.activeTx
 	s.activeTx = nil
+
+	if pendingMail.GetRemoteAddress() == s.hostname {
+		s.handler.StoreLocalMail(pendingMail, pendingMail.ToLocalUser())
+		return s.Reply(smtp.CodeOK, "")
+	}
 	if err := s.handler.QueueMail(pendingMail); err != nil {
 		return s.Reply(smtp.CodeTransactionFailed, "")
 	}
@@ -429,7 +464,6 @@ func (s *ServerSession) requireAuth() error {
 }
 
 func (c *ServerSession) ReadDataLine(maxSize int) (line string, terminated bool, err error) {
-
 	var buf []byte
 	for {
 		// For data lines we do this first as the DATA sequence terminator is <CRLF>.<CRLF>
@@ -468,6 +502,22 @@ func (c *ServerSession) ReadDataLine(maxSize int) (line string, terminated bool,
 		if err != nil {
 			return string(buf), false, err
 		}
+
+		if b == '.' && len(buf) == 0 {
+			// handle dot-unstuffing per section 5.3 Point 1
+			// '.' as the first char gets sent as two dots.
+			dotByte, err := c.conn.reader.Peek(1)
+			if err != nil {
+				return "", false, err
+			}
+			if dotByte[0] != '.' {
+				// Should not happen
+				return "", false, errors.New("Expected dot-unstuffing")
+			}
+			// Discard the next byte
+			c.conn.reader.Discard(1)
+		}
+
 		buf = append(buf, b)
 		if len(buf) > maxSize-2 { // -2 to accomodate for the <CRLF>
 			return "", false, fmt.Errorf("line exceeds max length of %d bytes", maxSize)

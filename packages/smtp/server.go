@@ -13,12 +13,14 @@ import (
 	"time"
 	"uuid"
 
+	"dk.magnusjensen/mymail/lib/maildir"
 	"dk.magnusjensen/mymail/lib/smtp"
 	"dk.magnusjensen/mymail/lib/smtp/session"
 )
 
 type AuthService interface {
 	AuthUser(username, password string) *User
+	IsValidUser(username string) bool
 }
 
 type smtpServer struct {
@@ -27,8 +29,6 @@ type smtpServer struct {
 	cfg          *Config
 	logger       *slog.Logger
 	authSvc      AuthService
-
-	pendingMails map[string]*smtp.MailTransaction
 }
 
 func NewSMTPServer(listener net.Listener, sendListener net.Listener, cfg *Config, logger *slog.Logger, authSvc AuthService) *smtpServer {
@@ -38,13 +38,11 @@ func NewSMTPServer(listener net.Listener, sendListener net.Listener, cfg *Config
 		cfg:          cfg,
 		logger:       logger,
 		authSvc:      authSvc,
-		pendingMails: map[string]*smtp.MailTransaction{},
 	}
 }
 
 func (s *smtpServer) QueueMail(mail *smtp.MailTransaction) error {
 	id := uuid.New().String()
-	s.pendingMails[id] = mail
 	// Write this to disk, as a temporary pending storage.
 	jsonMail, err := json.MarshalIndent(mail, "", "  ")
 	if err != nil {
@@ -63,11 +61,16 @@ func (s *smtpServer) QueueMail(mail *smtp.MailTransaction) error {
 		return err
 	}
 
-	delete(s.pendingMails, id)
 	return nil
 }
 
 func (s *smtpServer) Start() {
+	// Setup root maildir if it doesn't already exist.
+	if err := os.MkdirAll(fmt.Sprintf("maildir/%s", s.cfg.Hostname), 0755); err != nil {
+		fmt.Printf("Failed to create root maildir: %v\n", err)
+		return
+	}
+
 	go s.processPendingMail()
 
 	// Listen for inbound connections
@@ -94,7 +97,8 @@ func (s *smtpServer) acceptInboundConnections() {
 			continue
 		}
 
-		serverSession := session.NewServerSession(s.logger, conn, s, session.InboundServerType, s.cfg.Hostname)
+		// conn.RemoteAddr().String() is the IP of the client connecting
+		serverSession := session.NewServerSession(s.logger, conn, s, session.InboundServerType, s.cfg.Hostname, conn.RemoteAddr().String())
 		if tlsCert != nil {
 			serverSession.SetTLSCertificate(*tlsCert)
 		}
@@ -119,7 +123,7 @@ func (s *smtpServer) acceptSendConnections() {
 			continue
 		}
 
-		serverSession := session.NewServerSession(s.logger, conn, s, session.SendServerType, s.cfg.Hostname)
+		serverSession := session.NewServerSession(s.logger, conn, s, session.SendServerType, s.cfg.Hostname, "")
 		if tlsCert != nil {
 			serverSession.SetTLSCertificate(*tlsCert)
 		}
@@ -143,6 +147,7 @@ func (s *smtpServer) processPendingMail() {
 		for mailId, mail := range pendingMails {
 			// TODO: Loop over all MX records and find the lowest preference
 			hostName := mail.GetRemoteAddress()
+
 			mxHost, err := smtp.GetPreferredMXHost(hostName)
 			if err != nil {
 				fmt.Println(err)
@@ -231,4 +236,23 @@ func (s *smtpServer) AuthenticateUser(username, password string) error {
 	}
 
 	return nil
+}
+
+func (s *smtpServer) IsValidUser(username string) bool {
+	return s.authSvc.IsValidUser(username)
+}
+
+func (s *smtpServer) StoreLocalMail(mail *smtp.MailTransaction, localUser string) {
+	if localUser == "" {
+		s.logger.Error("Local user can not be empty")
+		return
+	}
+
+	s.logger.Debug("storing local mail for user", "local_user", localUser)
+
+	store := maildir.NewMaildirStore(filepath.Join("maildir", s.cfg.Hostname, localUser))
+
+	if err := store.StoreMail(mail.DataAsByte()); err != nil {
+		s.logger.Error("errored storing local mail", "err", err)
+	}
 }

@@ -22,12 +22,19 @@ func (ms *mockServerSessionHandler) AuthenticateUser(username, password string) 
 	return nil
 }
 
+func (ms *mockServerSessionHandler) StoreLocalMail(mail *smtp.MailTransaction, localUser string) {
+
+}
+func (ms *mockServerSessionHandler) IsValidUser(username string) bool {
+	return false
+}
+
 func setupServerSession(serverType ServerType) (*ServerSession, net.Conn, net.Conn) {
 	client, server := net.Pipe()
 	client.SetDeadline(time.Now().Add(time.Second))
 	server.SetDeadline(time.Now().Add(time.Second))
 
-	return NewServerSession(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})), server, &mockServerSessionHandler{}, serverType, HostName), client, server
+	return NewServerSession(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})), server, &mockServerSessionHandler{}, serverType, HostName, ""), client, server
 }
 
 func TestReplyMulti(t *testing.T) {

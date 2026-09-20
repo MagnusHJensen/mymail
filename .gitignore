@@ -1,3 +1,7 @@
 pending-mails
 *.pem
 *.json
+
+*spec.md
+maildir 
+!lib/maildir

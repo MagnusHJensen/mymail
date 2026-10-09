@@ -66,7 +66,7 @@ func (s *smtpServer) QueueMail(mail *smtp.MailTransaction) error {
 
 func (s *smtpServer) Start() {
 	// Setup root maildir if it doesn't already exist.
-	if err := os.MkdirAll(fmt.Sprintf("maildir/%s", s.cfg.Hostname), 0755); err != nil {
+	if err := os.MkdirAll(fmt.Sprintf("maildir/%s", s.cfg.MailDomain), 0755); err != nil {
 		fmt.Printf("Failed to create root maildir: %v\n", err)
 		return
 	}
@@ -97,8 +97,13 @@ func (s *smtpServer) acceptInboundConnections() {
 			continue
 		}
 
-		// conn.RemoteAddr().String() is the IP of the client connecting
-		serverSession := session.NewServerSession(s.logger, conn, s, session.InboundServerType, s.cfg.Hostname, conn.RemoteAddr().String())
+		// conn.RemoteAddr().String() is the IP with a port of the client connecting
+		host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+		if err != nil {
+			s.logger.Error("failed to split host port from incoming address")
+			continue
+		}
+		serverSession := session.NewServerSession(s.logger, conn, s, session.InboundServerType, s.cfg.Hostname, s.cfg.MailDomain, host)
 		if tlsCert != nil {
 			serverSession.SetTLSCertificate(*tlsCert)
 		}
@@ -123,7 +128,7 @@ func (s *smtpServer) acceptSendConnections() {
 			continue
 		}
 
-		serverSession := session.NewServerSession(s.logger, conn, s, session.SendServerType, s.cfg.Hostname, "")
+		serverSession := session.NewServerSession(s.logger, conn, s, session.SendServerType, s.cfg.Hostname, s.cfg.MailDomain, "")
 		if tlsCert != nil {
 			serverSession.SetTLSCertificate(*tlsCert)
 		}
@@ -175,9 +180,16 @@ func (s *smtpServer) processPendingMail() {
 }
 
 func (s *smtpServer) relay(mail *smtp.MailTransaction, remoteAddr string) error {
-	//netConn, err := net.Dial("tcp", remoteAddr+":25")
 
-	netConn, err := smtp.DialViaSocks5("127.0.0.1:1080", remoteAddr, 25)
+	var netConn net.Conn
+	var err error
+	if s.cfg.Debug {
+		// dial via SOCKS proxy
+		netConn, err = smtp.DialViaSocks5("127.0.0.1:1080", remoteAddr, 25)
+	} else {
+		netConn, err = net.Dial("tcp", remoteAddr+":25")
+	}
+
 	if err != nil {
 		return err
 	}
@@ -248,9 +260,18 @@ func (s *smtpServer) StoreLocalMail(mail *smtp.MailTransaction, localUser string
 		return
 	}
 
+	if strings.Contains(localUser, "/") {
+		s.logger.Error("Local user can not contain '/'")
+		return
+	}
+	if strings.Contains(localUser, "..") {
+		s.logger.Error("Local user can not contain '..'")
+		return
+	}
+
 	s.logger.Debug("storing local mail for user", "local_user", localUser)
 
-	store := maildir.NewMaildirStore(filepath.Join("maildir", s.cfg.Hostname, localUser))
+	store := maildir.NewMaildirStore(filepath.Join("maildir", s.cfg.MailDomain, localUser))
 
 	if err := store.StoreMail(mail.DataAsByte()); err != nil {
 		s.logger.Error("errored storing local mail", "err", err)

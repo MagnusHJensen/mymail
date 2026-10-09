@@ -34,7 +34,7 @@ func setupServerSession(serverType ServerType) (*ServerSession, net.Conn, net.Co
 	client.SetDeadline(time.Now().Add(time.Second))
 	server.SetDeadline(time.Now().Add(time.Second))
 
-	return NewServerSession(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})), server, &mockServerSessionHandler{}, serverType, HostName, ""), client, server
+	return NewServerSession(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})), server, &mockServerSessionHandler{}, serverType, HostName, HostName, ""), client, server
 }
 
 func TestReplyMulti(t *testing.T) {

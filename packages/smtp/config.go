@@ -1,10 +1,15 @@
 package main
 
-import "flag"
+import (
+	"flag"
+	"log"
+)
 
 type Config struct {
-	Debug    bool
-	Hostname string
+	Debug bool
+
+	Hostname   string
+	MailDomain string
 
 	TLSCertFile string
 	TLSKeyFile  string
@@ -19,6 +24,8 @@ type Config struct {
 func LoadConfig() *Config {
 	cfg := &Config{}
 	flag.BoolVar(&cfg.Debug, "debug", false, "Whether to start in debug mode")
+
+	flag.StringVar(&cfg.MailDomain, "mail-domain", "", "The mail domain for recipient, sender and maildir checks.")
 	flag.StringVar(&cfg.Hostname, "hostname", "", "The hostname this SMTP server acts as")
 
 	flag.StringVar(&cfg.TLSCertFile, "tls-cert-file", "", "The TLS cert file")
@@ -30,6 +37,9 @@ func LoadConfig() *Config {
 	flag.Parse()
 
 	// TODO: Add config validation
+	if cfg.Hostname == "" || cfg.MailDomain == "" {
+		log.Fatal("both -hostname and -mail-domain are required")
+	}
 
 	return cfg
 }

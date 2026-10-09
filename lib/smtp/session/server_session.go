@@ -20,7 +20,8 @@ import (
 type ServerSession struct {
 	conn       *Connection
 	logger     *slog.Logger
-	hostname   string
+	hostname   string // this server's own name, used in greetings
+	mailDomain string // the domain after @ that this server handles mail for
 	serverType ServerType
 	handler    ServerSessionHandler
 
@@ -63,7 +64,7 @@ const (
 
 var SupportedAuthMechanisms = []string{sasl.PlainMechanism}
 
-func NewServerSession(logger *slog.Logger, netConn net.Conn, handler ServerSessionHandler, serverType ServerType, hostname string, connectingIP string) *ServerSession {
+func NewServerSession(logger *slog.Logger, netConn net.Conn, handler ServerSessionHandler, serverType ServerType, hostname string, mailDomain string, connectingIP string) *ServerSession {
 	serverLogger := logger.With("as", "server")
 	switch serverType {
 	case InboundServerType:
@@ -76,6 +77,7 @@ func NewServerSession(logger *slog.Logger, netConn net.Conn, handler ServerSessi
 		conn:         NewConnection(netConn, serverLogger),
 		logger:       logger,
 		hostname:     hostname,
+		mailDomain:   mailDomain,
 		state:        ServerSessionFresh,
 		handler:      handler,
 		serverType:   serverType,
@@ -175,6 +177,10 @@ func (s *ServerSession) handleCommand(line string) error {
 	case "DATA":
 		return s.handleData()
 	case smtp.StartTLSCmd:
+		if s.conn.isTLSSessionActive {
+			return s.Reply(smtp.CodeBadSequence, "TLS is already active")
+		}
+
 		if err := s.Reply(smtp.CodeReady, "Ready for TLS"); err != nil {
 			return err
 		}
@@ -231,8 +237,13 @@ func (s *ServerSession) handleMail(cmdParts []string) error {
 	mailTransaction := &smtp.MailTransaction{
 		From: from,
 	}
+
+	if s.activeTx != nil {
+		return smtp.NewReplyError(smtp.CodeBadSequence, "A mail transaction is already in progress")
+	}
+
 	if s.serverType == InboundServerType {
-		if mailTransaction.GetFromHostname() == s.hostname {
+		if mailTransaction.GetFromHostname() == s.mailDomain {
 			// block mails from our own domain on the inbound port.
 			return smtp.NewReplyError(smtp.CodeActionNotTaken, "Use the send address (:587) to send mails")
 		}
@@ -248,14 +259,10 @@ func (s *ServerSession) handleMail(cmdParts []string) error {
 			return smtp.NewReplyError(smtp.CodeActionNotTaken, "Failed SPF verification")
 		}
 	} else if s.serverType == SendServerType {
-		if mailTransaction.GetFromHostname() != s.hostname {
+		if mailTransaction.GetFromHostname() != s.mailDomain {
 			// block mails from other domains on our send port
 			return smtp.NewReplyError(smtp.CodeActionNotTaken, "Use the MTA address (:25) to deliver mails")
 		}
-	}
-
-	if s.activeTx != nil {
-		return smtp.NewReplyError(smtp.CodeBadSequence, "A mail transaction is already in progress")
 	}
 
 	s.activeTx = mailTransaction
@@ -278,18 +285,19 @@ func (s *ServerSession) handleRecipient(cmdParts []string) error {
 	to := strings.SplitN(cmdParts[1], ":", 2)[1]
 	s.activeTx.To = &to
 
-	if s.serverType == InboundServerType && s.activeTx.GetRemoteAddress() != s.hostname {
+	if s.serverType == InboundServerType && s.activeTx.GetRemoteAddress() != s.mailDomain {
 		// We will only handle inbound mails to our domain
 		// TODO: 5.1.1
 		s.activeTx = nil
 		return smtp.NewReplyError(smtp.CodeActionNotTaken, "The email account you tried to reach does not exist")
 	}
 
-	if s.activeTx.GetRemoteAddress() == s.hostname {
+	if s.activeTx.GetRemoteAddress() == s.mailDomain {
 		// if it's for us either delivered or attempting to send
 		// verify the user exists
 		// ? Is this the correct approach or should we accept and send a bounce message later?
 		if !s.handler.IsValidUser(s.activeTx.TemporaryTO()) {
+			s.activeTx = nil
 			return smtp.NewReplyError(smtp.CodeActionNotTaken, "mailbox not found")
 		}
 	}
@@ -331,7 +339,7 @@ func (s *ServerSession) handleData() error {
 	pendingMail := s.activeTx
 	s.activeTx = nil
 
-	if pendingMail.GetRemoteAddress() == s.hostname {
+	if pendingMail.GetRemoteAddress() == s.mailDomain {
 		s.handler.StoreLocalMail(pendingMail, pendingMail.ToLocalUser())
 		return s.Reply(smtp.CodeOK, "")
 	}
@@ -347,19 +355,21 @@ func (s *ServerSession) shuttingDown() {
 	}
 }
 
-func (c *ServerSession) UpgradeToTLS() {
+func (s *ServerSession) UpgradeToTLS() {
 	// Wrap the current connection with a TLS server
-	tlsServer := tls.Server(c.conn.net, &tls.Config{
+	tlsServer := tls.Server(s.conn.net, &tls.Config{
 		Certificates: []tls.Certificate{
-			c.tlsCertificate,
+			s.tlsCertificate,
 		},
 	})
 	if err := tlsServer.Handshake(); err != nil {
 		panic(err)
 	}
-	c.conn.net = tlsServer
-	c.conn.reader = bufio.NewReader(c.conn.net)
-	c.conn.isTLSSessionActive = true
+	s.conn.net = tlsServer
+	s.conn.reader = bufio.NewReader(s.conn.net)
+	s.conn.isTLSSessionActive = true
+	s.state = ServerSessionFresh
+	s.activeTx = nil
 }
 
 func (s *ServerSession) HandleAuth(authParts []string) error {

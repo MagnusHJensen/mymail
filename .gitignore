@@ -5,3 +5,5 @@ pending-mails
 *spec.md
 maildir 
 !lib/maildir
+
+mymail-smtp

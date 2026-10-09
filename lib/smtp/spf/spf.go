@@ -26,6 +26,10 @@ const (
 //
 // [1] https://www.rfc-editor.org/info/rfc7208/#section-4
 func VerifySPFHost(fromIP string, host string) (Result, error) {
+	return verifySPFHost(fromIP, host, 0)
+}
+
+func verifySPFHost(fromIP string, host string, count int) (Result, error) {
 	txtRecords, err := net.LookupTXT(host)
 	if err != nil {
 		fmt.Printf("Failed to lookup TXT records: %v\n", err)
@@ -88,6 +92,17 @@ func VerifySPFHost(fromIP string, host string) (Result, error) {
 				// Only if we match do we return the pass/fail result, else if no match go onto the next term.
 				return mapQualifierToResult(term.qualifier), nil
 			}
+		}
+	}
+
+	// We didn't match nor did we encounter an "all" mechanism, check for a redirect
+	for _, modifier := range spfRecord.ModifierTerms {
+		if modifier.modifier == RedirectModifierType {
+			count++ // increment and break if we hit 10, to avoid infinite recursions
+			if count > 10 {
+				return TempErrorResult, errors.New("hit more than 10 recursions on redirect modifiers")
+			}
+			return verifySPFHost(fromIP, modifier.value, count)
 		}
 	}
 

@@ -16,42 +16,46 @@ const (
 type SPFRecord struct {
 	Version        string
 	DirectiveTerms []directiveTerm
+	ModifierTerms  []modifierTerm
 }
 
 func ParseRecord(record string) (*SPFRecord, error) {
-	version, directiveTerms, err := readRecord(record)
+	version, directiveTerms, modifierTerms, err := readRecord(record)
 	if err != nil {
 		return nil, err
 	}
 	return &SPFRecord{
 		Version:        version,
 		DirectiveTerms: directiveTerms,
+		ModifierTerms:  modifierTerms,
 	}, nil
 }
 
-func readRecord(record string) (version string, directiveTerms []directiveTerm, err error) {
+func readRecord(record string) (version string, directiveTerms []directiveTerm, modifierTerms []modifierTerm, err error) {
 	parts := strings.SplitN(record, " ", 2)
 	version = parts[0]
 	if len(parts) == 1 {
 		// Record only contains version
-		return version, nil, nil
+		return version, nil, nil, nil
 	}
 	terms := strings.Split(parts[1], " ")
 
 	directiveTerms = []directiveTerm{}
+	modifierTerms = []modifierTerm{}
 	for _, term := range terms {
 		if isModifierTerm(term) {
 			// modifier term
+			modifierTerms = append(modifierTerms, parseModifierTerm(term))
 		} else {
 			// directive term
 			directiveTerm, err := parseDirectiveTerm(term)
 			if err != nil {
-				return "", nil, err
+				return "", nil, nil, err
 			}
 
 			if directiveTerm.mechanism == nil {
 				// fail each directive term requires a mechanism
-				return "", nil, errors.New("failed to parse mechanism for term")
+				return "", nil, nil, errors.New("failed to parse mechanism for term")
 			}
 
 			directiveTerms = append(directiveTerms, *directiveTerm)
@@ -59,13 +63,14 @@ func readRecord(record string) (version string, directiveTerms []directiveTerm, 
 			if directiveTerm.mechanism != nil && directiveTerm.mechanism.mechanismType == AllMechanismType {
 				// https://www.rfc-editor.org/info/rfc7208/#section-5.1
 				// short-circuit and ignore right of All mechanism
-				// TODO: Figure out if that also counts for modifiers.
-				return version, directiveTerms, nil
+
+				// "redirect" modifier MUST be ignored if an "all" mechanism is present.
+				return version, directiveTerms, nil, nil
 			}
 		}
 	}
 
-	return version, directiveTerms, nil
+	return version, directiveTerms, modifierTerms, nil
 }
 
 func isModifierTerm(term string) bool {
@@ -97,6 +102,26 @@ func parseDirectiveTerm(term string) (*directiveTerm, error) {
 		qualifier: qualifier,
 		mechanism: mechanism,
 	}, nil
+}
+
+type ModifierType string
+
+const (
+	RedirectModifierType ModifierType = "redirect"
+)
+
+type modifierTerm struct {
+	modifier ModifierType
+	value    string
+}
+
+func parseModifierTerm(term string) modifierTerm {
+	parts := strings.SplitN(term, "=", 2)
+
+	return modifierTerm{
+		modifier: ModifierType(parts[0]),
+		value:    parts[1],
+	}
 }
 
 type MechanismType string

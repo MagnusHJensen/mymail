@@ -66,3 +66,12 @@ func (c *Connection) sendRaw(cmd string) error {
 	c.logger.Debug(fmt.Sprintf("sent %s", trimmedLine))
 	return nil
 }
+
+func (c *Connection) sendDataLine(line string) error {
+	if _, err := c.net.Write([]byte(line)); err != nil {
+		return err
+	}
+	trimmedLine := strings.TrimSuffix(line, "\r\n")
+	c.logger.Debug(fmt.Sprintf("sent %s", trimmedLine))
+	return nil
+}

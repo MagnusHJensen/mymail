@@ -7,3 +7,4 @@ maildir
 !lib/maildir
 
 mymail-smtp
+deploy.sh

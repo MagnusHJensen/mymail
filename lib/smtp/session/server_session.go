@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"uuid"
 
 	"dk.magnusjensen/mymail/lib/smtp"
 	"dk.magnusjensen/mymail/lib/smtp/sasl"
@@ -339,10 +340,16 @@ func (s *ServerSession) handleData() error {
 	pendingMail := s.activeTx
 	s.activeTx = nil
 
+	if s.serverType == SendServerType {
+		messageID := uuid.New().String()
+		pendingMail.AppendHeader("Message-ID", fmt.Sprintf("<%s@%s>", messageID, s.mailDomain))
+	}
+
 	if pendingMail.GetRemoteAddress() == s.mailDomain {
 		s.handler.StoreLocalMail(pendingMail, pendingMail.ToLocalUser())
 		return s.Reply(smtp.CodeOK, "")
 	}
+
 	if err := s.handler.QueueMail(pendingMail); err != nil {
 		return s.Reply(smtp.CodeTransactionFailed, "")
 	}

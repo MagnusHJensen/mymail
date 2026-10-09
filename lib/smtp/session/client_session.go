@@ -94,7 +94,10 @@ func (s *ClientSession) SendMail(mail *smtp.MailTransaction) error {
 	// send each line in data one-by-one, finish with <CRLF>.<CRLF>
 
 	for _, line := range mail.Data {
-		if err := s.conn.sendRaw(line); err != nil {
+		if strings.HasPrefix(line, ".") {
+			line = "." + line // send "." as ".." for dot-unstuffing
+		}
+		if err := s.conn.sendDataLine(line); err != nil {
 			return err
 		}
 	}
@@ -233,26 +236,26 @@ func (s *ClientSession) InitAuth(authLine string) error {
 }
 
 func (s *ClientSession) Mail(mail *smtp.MailTransaction) error {
-	if err := s.sendCommand(smtp.MailCmd, fmt.Sprintf("FROM:<%s>", *mail.To)); err != nil {
+	if err := s.sendCommand(smtp.MailCmd, fmt.Sprintf("FROM:<%s>", strings.Trim(mail.From, "<>"))); err != nil {
 		return err
 	}
-	if code, _, err := s.ReadReply(); err != nil {
+	if code, lines, err := s.ReadReply(); err != nil {
 		return err
 	} else if code != int(smtp.CodeOK) {
-		return fmt.Errorf("Got non OK code for %s: %d", smtp.MailCmd, code)
+		return fmt.Errorf("Got non OK code for %s: %d\n - %v", smtp.MailCmd, code, lines)
 	}
 
 	return nil
 }
 
 func (s *ClientSession) Recipient(mail *smtp.MailTransaction) error {
-	if err := s.sendCommand(smtp.RecipientCmd, fmt.Sprintf("TO:<%s>", *mail.To)); err != nil {
+	if err := s.sendCommand(smtp.RecipientCmd, fmt.Sprintf("TO:<%s>", strings.Trim(*mail.To, "<>"))); err != nil {
 		return err
 	}
-	if code, _, err := s.ReadReply(); err != nil {
+	if code, lines, err := s.ReadReply(); err != nil {
 		return err
 	} else if code != int(smtp.CodeOK) {
-		return fmt.Errorf("Got non OK code for %s: %d", smtp.RecipientCmd, code)
+		return fmt.Errorf("Got non OK code for %s: %d\n - %v", smtp.RecipientCmd, code, lines)
 	}
 	return nil
 }

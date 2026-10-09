@@ -187,7 +187,7 @@ func (s *smtpServer) relay(mail *smtp.MailTransaction, remoteAddr string) error 
 		// dial via SOCKS proxy
 		netConn, err = smtp.DialViaSocks5("127.0.0.1:1080", remoteAddr, 25)
 	} else {
-		netConn, err = net.Dial("tcp", remoteAddr+":25")
+		netConn, err = net.Dial("tcp4", remoteAddr+":25")
 	}
 
 	if err != nil {

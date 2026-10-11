@@ -11,6 +11,8 @@ type Config struct {
 	Hostname   string
 	MailDomain string
 
+	NoSend bool
+
 	TLSCertFile string
 	TLSKeyFile  string
 
@@ -24,6 +26,8 @@ type Config struct {
 func LoadConfig() *Config {
 	cfg := &Config{}
 	flag.BoolVar(&cfg.Debug, "debug", false, "Whether to start in debug mode")
+
+	flag.BoolVar(&cfg.NoSend, "no-send", false, "If true does not send any emails out only accepts incoming")
 
 	flag.StringVar(&cfg.MailDomain, "mail-domain", "", "The mail domain for recipient, sender and maildir checks.")
 	flag.StringVar(&cfg.Hostname, "hostname", "", "The hostname this SMTP server acts as")

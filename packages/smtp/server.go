@@ -57,6 +57,12 @@ func (s *smtpServer) QueueMail(mail *smtp.MailTransaction) error {
 	if err := os.Mkdir(cwd+"/pending-mails", 0755); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
+
+	if s.cfg.NoSend {
+		s.logger.Debug("skipped storing pending mail")
+		return nil
+	}
+
 	if err := os.WriteFile(cwd+"/pending-mails/"+id+".json", jsonMail, 0644); err != nil {
 		return err
 	}

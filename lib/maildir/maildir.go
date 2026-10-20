@@ -125,7 +125,7 @@ func (s *MaildirStore) GetMailbox(mailboxToGet string) (*Mailbox, error) {
 		return nil, fmt.Errorf("failed to collect current messages: %w", err)
 	}
 
-	assigned := []*MessageMeta{}
+	assigned := []*MailboxMessage{}
 	unassigned := []*MessageMeta{}
 
 	// what is left in recordsByUniqueCopy is vanished from the maildir
@@ -135,8 +135,10 @@ func (s *MaildirStore) GetMailbox(mailboxToGet string) (*Mailbox, error) {
 
 		// assigned
 		if record := uidList.recordsByUnique[message.Unique.ToFileName()]; record != nil {
-			assigned = append(assigned, message)
-			mailbox.load(record.UID, message)
+			assigned = append(assigned, &MailboxMessage{
+				UID:  record.UID,
+				Meta: message,
+			})
 			// delete from copy map
 			delete(recordsByUniqueCopy, message.Unique.ToFileName())
 			continue
@@ -145,6 +147,8 @@ func (s *MaildirStore) GetMailbox(mailboxToGet string) (*Mailbox, error) {
 		// in current messages, but not in uidlist
 		unassigned = append(unassigned, message)
 	}
+
+	mailbox.loadAll(assigned)
 
 	// sort unassigned to be deterministic
 	slices.SortFunc(unassigned, func(messageA, messageB *MessageMeta) int {

@@ -154,7 +154,11 @@ func ParseMessageMeta(meta string) (*MessageMeta, error) {
 }
 
 type Message struct {
-	UID    uint32
-	Meta   *MessageMeta
+	*MailboxMessage
 	Format *imf.MessageFormat
+}
+
+type MailboxMessage struct {
+	UID  uint32
+	Meta *MessageMeta // current full filename + flags
 }

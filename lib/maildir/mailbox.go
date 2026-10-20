@@ -2,29 +2,32 @@ package maildir
 
 import (
 	"bufio"
+	"cmp"
 	"fmt"
 	"os"
 	"path"
+	"slices"
+	"sync"
 
 	"dk.magnusjensen/mymail/lib/imf"
 )
 
 type Mailbox struct {
 	// path is the absolute path to the mailbox root (not root of maildir)
-	path           string
-	uidList        *UIDList
-	loadedMessages map[uint32]*MessageMeta //uid -> meta (full filename)
-	// TODO: Move above to a slice, that is UID sorted
-	// on initial scan/load, all assigned sorted by UID, then as we add each unassigned append them to the end
+	path    string
+	uidList *UIDList
 
+	mutex sync.RWMutex
+
+	messages []*MailboxMessage
 }
 
 func newMailbox(path string, uidList *UIDList) *Mailbox {
 
 	return &Mailbox{
-		path:           path,
-		uidList:        uidList,
-		loadedMessages: make(map[uint32]*MessageMeta),
+		path:     path,
+		uidList:  uidList,
+		messages: make([]*MailboxMessage, 0),
 	}
 }
 
@@ -67,7 +70,7 @@ func (m *Mailbox) getCurrentMessages() ([]*MessageMeta, error) {
 }
 
 func (m *Mailbox) Count() int {
-	return m.uidList.CountExists()
+	return len(m.messages)
 }
 
 func (m *Mailbox) GetUIDValidity() uint32 {
@@ -80,41 +83,80 @@ func (m *Mailbox) GetUIDNext() uint32 {
 
 func (m *Mailbox) assign(meta *MessageMeta) {
 	assignedUID := m.uidList.addRecord(meta.Unique)
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
 
-	m.loadedMessages[assignedUID] = meta
+	// append to the end as UID always goes up
+	// ? If issues arise once we get to counter wrapping, we can tackle it then.
+	m.messages = append(m.messages, &MailboxMessage{
+		UID:  assignedUID,
+		Meta: meta,
+	})
 }
 
 // loads a message into the memory of the mailbox
-func (m *Mailbox) load(uid uint32, meta *MessageMeta) {
-	m.loadedMessages[uid] = meta
-}
+func (m *Mailbox) loadAll(metas []*MailboxMessage) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
 
-// Fetch gets a list of messages by their uids
-func (m *Mailbox) Fetch(uids []uint32) ([]*Message, error) {
-	fetchedMessages := []*Message{}
-	for _, uid := range uids {
-		messageMeta, ok := m.loadedMessages[uid]
-		if !ok {
-			// TODO: Log? Fail?
-			continue
-		}
-
-		messageFile, err := os.Open(path.Join(m.path, "cur", messageMeta.ToFileName()))
-		if err != nil {
-			return nil, fmt.Errorf("failed to open message file %q: %w", messageMeta.ToFileName(), err)
-		}
-
-		format, err := imf.NewMessageFormat(bufio.NewReader(messageFile))
-		if err != nil {
-			return nil, fmt.Errorf("failed to read message %q: %w", messageMeta.ToFileName(), err)
-		}
-
-		fetchedMessages = append(fetchedMessages, &Message{
-			Meta:   messageMeta,
-			Format: format,
-			UID:    uid,
-		})
+	for _, meta := range metas {
+		m.messages = append(m.messages, meta)
 	}
 
-	return fetchedMessages, nil
+	slices.SortFunc(m.messages, func(a, b *MailboxMessage) int {
+		return cmp.Compare(a.UID, b.UID)
+	})
+}
+
+func (m *Mailbox) BySeq(seq uint32) (message *Message, sequence uint32, found bool) {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+	if seq == 0 || int(seq) > len(m.messages) {
+		return nil, 0, false
+	}
+
+	foundMessage := m.messages[seq-1]
+
+	messageFile, err := os.Open(path.Join(m.path, "cur", foundMessage.Meta.ToFileName()))
+	if err != nil {
+		return nil, 0, false
+	}
+
+	format, err := imf.NewMessageFormat(bufio.NewReader(messageFile))
+	if err != nil {
+		return nil, 0, false
+	}
+
+	return &Message{
+		MailboxMessage: foundMessage,
+		Format:         format,
+	}, seq, true
+}
+
+func (m *Mailbox) ByUID(uid uint32) (message *Message, seq uint32, found bool) {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+	i, found := slices.BinarySearchFunc(m.messages, uid, func(msg *MailboxMessage, uid uint32) int {
+		return cmp.Compare(msg.UID, uid)
+	})
+	if !found {
+		return nil, 0, false
+	}
+
+	foundMessage := m.messages[i]
+
+	messageFile, err := os.Open(path.Join(m.path, "cur", foundMessage.Meta.ToFileName()))
+	if err != nil {
+		return nil, 0, false
+	}
+
+	format, err := imf.NewMessageFormat(bufio.NewReader(messageFile))
+	if err != nil {
+		return nil, 0, false
+	}
+
+	return &Message{
+		MailboxMessage: foundMessage,
+		Format:         format,
+	}, uint32(i + 1), true
 }

@@ -31,6 +31,7 @@ func (l *UIDList) CountExists() int {
 
 func readUIDList(dirPath string) (*UIDList, error) {
 	uidListFile, err := os.Open(path.Join(dirPath, "uidlist"))
+	defer uidListFile.Close()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			// if it doesn't exist we create it

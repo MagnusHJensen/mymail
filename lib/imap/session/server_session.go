@@ -160,7 +160,9 @@ func (s *imapServerSession) handleClientCommand(line string) (terminate bool) {
 	case "CLOSE":
 		return s.handleClose(tag)
 	case "FETCH":
-		return s.handleFetch(tag, parts[2])
+		return s.handleFetch(tag, parts[2], false)
+	case "UID":
+		return s.handleUID(tag, parts[2])
 	default:
 		if err := s.Reply(tag, imap.NoCode, "not supported"); err != nil {
 			s.logger.Error("failed to reply", "err", err)
@@ -172,7 +174,7 @@ func (s *imapServerSession) handleClientCommand(line string) (terminate bool) {
 }
 
 func (s *imapServerSession) handleCapabilities(tag string) (terminate bool) {
-	capabilities := []string{"IMAP4rev2", "IMAP4rev1", "LOGINDISABLED"}
+	capabilities := []string{"IMAP4rev2", "LOGINDISABLED"}
 
 	if !s.conn.isTLSSessionActive {
 		// Advertise STARTTLS
@@ -347,7 +349,7 @@ func (s *imapServerSession) handleClose(tag string) (terminate bool) {
 	return false
 }
 
-func (s *imapServerSession) handleFetch(tag, args string) (terminate bool) {
+func (s *imapServerSession) handleFetch(tag, args string, isUIDSequence bool) (terminate bool) {
 	if s.state != selectedSessionState {
 		s.Reply(tag, imap.BadCode, "FETCH is not allowed in a non selected state")
 		return false
@@ -367,30 +369,130 @@ func (s *imapServerSession) handleFetch(tag, args string) (terminate bool) {
 		return false
 	}
 
-	messages, err := s.selectedMailbox.Fetch([]uint32{uint32(parsedSequenceSet)})
-	if err != nil {
-		s.logger.Error("failed to fetch mails", "err", err)
-		return true
+	var message *maildir.Message
+	var seq uint32
+	var found bool
+	if isUIDSequence {
+		message, seq, found = s.selectedMailbox.ByUID(uint32(parsedSequenceSet))
+		if !found {
+			s.logger.Error("failed to fetch mails by uids", "uids", parsedSequenceSet)
+			return true
+		}
+	} else {
+		message, seq, found = s.selectedMailbox.BySeq(uint32(parsedSequenceSet))
+		if !found {
+			s.logger.Error("failed to fetch mails by sequence", "sequence", parsedSequenceSet)
+			return true
+		}
+	}
+
+	messages := []*maildir.Message{message}
+
+	messageDataItems := []string{}
+	for _, dataItem := range parts[1:] {
+		// first trim ( and ) from the ends, since the first and last item is wrapped with it
+		dataItem = strings.TrimLeft(dataItem, "(")
+		dataItem = strings.TrimRight(dataItem, ")")
+
+		messageDataItems = append(messageDataItems, dataItem)
 	}
 
 	for _, message := range messages {
-		internalDate := time.Unix(message.Meta.Unique.UnixSeconds, 0).Format("_2-Jan-2006 15:04:05 -0700")
-		size := message.Meta.Unique.Size
-		headerPeek := ""
-		for key, value := range message.Format.Headers {
-			headerPeek += fmt.Sprintf("%s: %s\r\n", key, value)
+		fetchTexts := []string{}
+
+		if slices.Contains(messageDataItems, "UID") || isUIDSequence {
+			// always include UID for UID commands, even if not requested.
+			fetchTexts = append(fetchTexts, fmt.Sprintf("UID %d", message.UID))
 		}
-		headerPeek += "\r\n" // header separator needs to be added
-		// TODO: We hardcode the response based on Apple mail, but read the fetch args to what we should return
-		// (FLAGS INTERNALDATE UID RFC822.SIZE BODY.PEEK[HEADER])
-		innerFetch := fmt.Sprintf("UID %d FLAGS () INTERNALDATE %q RFC822.SIZE %d BODY[HEADER] {%d}\r\n%s", message.UID, internalDate, size, len(headerPeek), headerPeek)
-		if err := s.SendNoCode(fmt.Sprintf("%d FETCH (%s)", message.UID, innerFetch)); err != nil {
+
+		if slices.Contains(messageDataItems, "FLAGS") {
+			fetchTexts = append(fetchTexts, "FLAGS ()")
+		}
+
+		if slices.Contains(messageDataItems, "INTERNALDATE") {
+			internalDate := time.Unix(message.Meta.Unique.UnixSeconds, 0).Format("_2-Jan-2006 15:04:05 -0700")
+			fetchTexts = append(fetchTexts, fmt.Sprintf("INTERNALDATE %q", internalDate))
+		}
+
+		if slices.Contains(messageDataItems, "RFC822.SIZE") {
+			size := message.Meta.Unique.Size
+			fetchTexts = append(fetchTexts, fmt.Sprintf("RFC822.SIZE %d", size))
+		}
+
+		// TODO: Handle these BODY[] and BODY.PEEK[] cases better
+		if slices.Contains(messageDataItems, "BODY.PEEK[HEADER]") {
+			headerPeek := message.Format.RawHeaders()
+			fetchTexts = append(fetchTexts, fmt.Sprintf("BODY[HEADER] {%d}\r\n%s", len(headerPeek), headerPeek))
+		}
+
+		if slices.Contains(messageDataItems, "BODY.PEEK[]") {
+			fullMessage := message.Format.RawFile()
+			fetchTexts = append(fetchTexts, fmt.Sprintf("BODY[] {%d}\r\n%s", len(fullMessage), fullMessage))
+		}
+
+		if slices.Contains(messageDataItems, "BODYSTRUCTURE") {
+			rawBody := message.Format.RawBody()
+			// TODO: Hardcoded to basic text MIME headers
+			// https://www.rfc-editor.org/info/rfc4021/#section-2.2 for a list of permanent MIME header fields
+			// RFC 9051 §9 | body-type-1part > body-type-text
+			// 1. media-text = "TEXT" "PLAIN" (coming from the Content-Type header in the mail)
+			// 2. body-fields > body-fld-param = ("CHARSET" "UTF-8")
+			// 2a. can be nil, but is params for the content type, can be tracked in RFC2046
+			// 2b. for text/plain, only charset is a possible param.
+			// 3. body-fields > body-fld-id = "NIL"
+			// 3a. is Content-ID header
+			// 4. body-fields > body-fld-desc = "NIL"
+			// 4a. can be nil and comes from Content-Description
+			// 5. body-fields > body-fld-enc = "7BIT"
+			// 5a. defaults to "7BIT" per RFC2045 if not present - comes from Content-Transfer-Encoding header
+			// 6. body-fields > body-fld-octets = number of octets(bytes) of the message body in it's encoding
+			// 7. body-fld-lines = number of lines in the body
+			fetchTexts = append(fetchTexts, fmt.Sprintf(`BODYSTRUCTURE ("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" %d %d)`, len(rawBody), len(message.Format.Body)))
+		}
+
+		innerFetch := strings.Join(fetchTexts, " ")
+		// TODO: We hardcode seq since we only support fetching one, but this needs to be iterated.
+		if err := s.SendNoCode(fmt.Sprintf("%d FETCH (%s)", seq, innerFetch)); err != nil {
 			s.logger.Error("failed to send untagged FETCH response", "err", err, "message_uid", message.UID)
 			return true
 		}
 	}
 
-	s.Reply(tag, imap.OkCode, "FETCH Completed")
+	if !isUIDSequence {
+		// If coming from UID, the UID handler will respond to the tag.
+		s.Reply(tag, imap.OkCode, "FETCH Completed")
+	}
+	return false
+}
+
+func (s *imapServerSession) handleUID(tag, args string) (terminate bool) {
+	if s.state != selectedSessionState {
+		s.Reply(tag, imap.BadCode, "FETCH is not allowed in a non selected state")
+		return false
+	}
+
+	parts := strings.Split(args, " ")
+	if len(parts) < 1 {
+		s.Reply(tag, imap.BadCode, "invalid number of arguments to UID")
+		return false
+	}
+
+	// the first arg to UID is the command we want to perform with a UID instead of sequences
+	// A non-existent unique identifier is ignored without any error message generated.
+	switch parts[0] {
+	case "FETCH":
+		if terminate := s.handleFetch("", strings.Join(parts[1:], " "), true); terminate {
+			return true
+		}
+	default:
+		if err := s.Reply(tag, imap.NoCode, "not supported UID command"); err != nil {
+			s.logger.Error("failed to reply", "err", err)
+			return true
+		}
+		return false
+	}
+
+	s.Reply(tag, imap.OkCode, fmt.Sprintf("UID %s Completed", parts[0]))
 	return false
 }
 

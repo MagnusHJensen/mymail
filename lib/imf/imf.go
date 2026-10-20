@@ -105,3 +105,31 @@ func readHeader(reader *bufio.Reader) (string, string, error) {
 		headerValue += string(readByte)
 	}
 }
+
+func (f *MessageFormat) RawHeaders() string {
+	headers := ""
+	for key, value := range f.Headers {
+		headers += fmt.Sprintf("%s: %s\r\n", key, value)
+	}
+	headers += "\r\n" // header separator needs to be added
+
+	return headers
+}
+
+func (f *MessageFormat) RawFile() string {
+	// First add all headers
+	rawFile := ""
+	rawFile += f.RawHeaders()
+	rawFile += f.RawBody()
+
+	return rawFile
+}
+
+func (f *MessageFormat) RawBody() string {
+	rawBody := ""
+	for _, line := range f.Body {
+		rawBody += line
+	}
+
+	return rawBody
+}

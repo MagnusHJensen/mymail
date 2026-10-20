@@ -5,10 +5,15 @@
 package maildir
 
 import (
+	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"path"
 	"path/filepath"
-	"time"
+	"slices"
+	"strings"
+	"syscall"
 )
 
 type MaildirStore struct {
@@ -16,9 +21,14 @@ type MaildirStore struct {
 }
 
 func NewMaildirStore(rootPath string) *MaildirStore {
-	return &MaildirStore{
+	store := &MaildirStore{
 		rootPath: rootPath,
 	}
+
+	if err := store.ensureMaildir(); err != nil {
+		fmt.Printf("failed to ensure maildir: %q", rootPath)
+	}
+	return store
 }
 
 func (s *MaildirStore) RootPath() string {
@@ -26,11 +36,9 @@ func (s *MaildirStore) RootPath() string {
 }
 
 func (s *MaildirStore) StoreMail(mail []byte) error {
-	if err := s.ensureMaildir(); err != nil {
-		return err
-	}
-	uniqueName := s.generateUniqueName()
-	tmpPath := fmt.Sprintf("%s/tmp/%s", s.rootPath, uniqueName)
+	uniqueMeta := GenerateUniqueMeta()
+	// mail always lands in root/INBOX
+	tmpPath := fmt.Sprintf("%s/tmp/%s", s.rootPath, uniqueMeta.ToFileName())
 	tmpFile, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
@@ -47,8 +55,8 @@ func (s *MaildirStore) StoreMail(mail []byte) error {
 		return err
 	}
 
-	final := fmt.Sprintf("%s,S=%d", uniqueName, sizeWritten)
-	if err := os.Rename(tmpPath, fmt.Sprintf("%s/new/%s", s.rootPath, final)); err != nil {
+	uniqueMeta.Size = uint(sizeWritten)
+	if err := os.Rename(tmpPath, fmt.Sprintf("%s/new/%s", s.rootPath, uniqueMeta.ToFileName())); err != nil {
 		return err
 	}
 
@@ -75,7 +83,105 @@ func (s *MaildirStore) ensureMaildir() error {
 	return nil
 }
 
-func (s *MaildirStore) generateUniqueName() string {
-	// Q1 should be a counter, but for now hardcoded to 1, "." <host> should be the server hostname it serves, but for now hardcoded to smtp.
-	return fmt.Sprintf("%d.M%dP%dQ1.smtp", time.Now().Unix(), time.Now().UnixMicro(), os.Getpid())
+// Getting the Mailbox, executes the maildir sync with the UIDList and move of "new" -> "cur"
+func (s *MaildirStore) GetMailbox(mailboxToGet string) (*Mailbox, error) {
+	mailboxDir := ""
+	if mailboxToGet != "INBOX" {
+		return nil, errors.New("non supported mail box")
+	}
+
+	// TODO: Something about a timeout here for the lock
+	// aquire the lock for the full sync
+	absMailboxDir := path.Join(s.rootPath, mailboxDir)
+	lockFile, err := os.OpenFile(path.Join(absMailboxDir, "uidlist.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open lock file: %w", err)
+	}
+	// closing the lockfile also releases the lock safely
+	defer lockFile.Close()
+
+	// hold an exclusive lock on this file while we read the actual uidlist file and perform a sync
+	err = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX)
+	if err != nil {
+		return nil, fmt.Errorf("failed to lock file: %w", err)
+	}
+
+	uidList, err := readUIDList(absMailboxDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read uidlist: %w", err)
+	}
+
+	mailbox := newMailbox(absMailboxDir, uidList)
+
+	// TODO: skip for STATUS
+	if err := mailbox.migrateToCurrent(); err != nil {
+		return nil, fmt.Errorf("failed to migrate to current: %w", err)
+	}
+
+	// collect all entries in "cur"
+
+	currentMessages, err := mailbox.getCurrentMessages()
+	if err != nil {
+		return nil, fmt.Errorf("failed to collect current messages: %w", err)
+	}
+
+	assigned := []*MessageMeta{}
+	unassigned := []*MessageMeta{}
+
+	// what is left in recordsByUniqueCopy is vanished from the maildir
+	recordsByUniqueCopy := map[string]*UIDListRecord{}
+	maps.Copy(recordsByUniqueCopy, uidList.recordsByUnique)
+	for _, message := range currentMessages {
+
+		// assigned
+		if record := uidList.recordsByUnique[message.Unique.ToFileName()]; record != nil {
+			assigned = append(assigned, message)
+			mailbox.load(record.UID, message)
+			// delete from copy map
+			delete(recordsByUniqueCopy, message.Unique.ToFileName())
+			continue
+		}
+
+		// in current messages, but not in uidlist
+		unassigned = append(unassigned, message)
+	}
+
+	// sort unassigned to be deterministic
+	slices.SortFunc(unassigned, func(messageA, messageB *MessageMeta) int {
+		// 1. by secs part in unique name
+		secondsSort := messageA.Unique.UnixSeconds - messageB.Unique.UnixSeconds
+
+		if secondsSort == 0 {
+			// 2. the full unique part, bytewise ascending
+			return strings.Compare(messageA.Unique.ToFileName(), messageB.Unique.ToFileName())
+		}
+
+		return int(secondsSort)
+	})
+
+	if len(unassigned) == 0 && len(recordsByUniqueCopy) == 0 {
+		// nothing changed, no new unassigned files and no vanished files
+		// TODO: most likely need to embed some data in here
+		return mailbox, nil
+	}
+
+	// add unassigned records and assign them a UID (happens inside)
+	for _, unassignedMeta := range unassigned {
+		mailbox.assign(unassignedMeta)
+	}
+
+	// drop vanished records
+	for _, value := range recordsByUniqueCopy {
+		uidList.removeRecord(value)
+	}
+
+	// rewrite uidlist atomically (SPEC 10.8)
+	// atomically by holding the lock
+	if err := uidList.rewrite(absMailboxDir); err != nil {
+		return nil, fmt.Errorf("failed to rewrite the uidlist: %w", err)
+	}
+
+	// release lock by closing the file via defer
+	// TODO: Do we need more data here? like counts etc.
+	return mailbox, nil
 }

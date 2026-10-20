@@ -1,4 +1,4 @@
-package main
+package shared
 
 import (
 	"encoding/json"
@@ -21,8 +21,7 @@ func (u *User) IsCorrectPassword(password string) bool {
 	return true
 }
 
-//TODO: This is a naive user impl. should update to use database.
-
+// TODO: This is a naive user impl. should update to use database.
 type authService struct {
 	logger *slog.Logger
 	users  map[string]User

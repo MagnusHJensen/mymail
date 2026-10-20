@@ -16,10 +16,11 @@ import (
 	"dk.magnusjensen/mymail/lib/maildir"
 	"dk.magnusjensen/mymail/lib/smtp"
 	"dk.magnusjensen/mymail/lib/smtp/session"
+	"dk.magnusjensen/mymail/packages/shared"
 )
 
 type AuthService interface {
-	AuthUser(username, password string) *User
+	AuthUser(username, password string) *shared.User
 	IsValidUser(username string) bool
 }
 

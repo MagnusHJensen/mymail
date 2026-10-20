@@ -3,7 +3,6 @@ package session
 import (
 	"bufio"
 	"crypto/tls"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,8 +12,8 @@ import (
 	"time"
 	"uuid"
 
+	"dk.magnusjensen/mymail/lib/sasl"
 	"dk.magnusjensen/mymail/lib/smtp"
-	"dk.magnusjensen/mymail/lib/smtp/sasl"
 	"dk.magnusjensen/mymail/lib/smtp/spf"
 )
 
@@ -403,13 +402,7 @@ func (s *ServerSession) HandleAuth(authParts []string) error {
 	}
 	// TODO: We only support plain
 	authEncoded := authParts[1]
-	authText, err := base64.StdEncoding.DecodeString(authEncoded)
-	if err != nil {
-		return err
-	}
-
-	// authText is now a SASL PLAIN string
-	_, authId, password, err := sasl.ParsePlainAuthMessage(string(authText))
+	_, authId, password, err := sasl.ParsePlainAuthMessage(authEncoded)
 	if err != nil {
 		return err
 	}

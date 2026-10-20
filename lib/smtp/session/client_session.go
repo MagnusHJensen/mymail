@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"strings"
 
+	"dk.magnusjensen/mymail/lib/sasl"
 	"dk.magnusjensen/mymail/lib/smtp"
-	"dk.magnusjensen/mymail/lib/smtp/sasl"
 )
 
 type ClientSessionState int

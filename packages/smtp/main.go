@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"net"
 	"os"
+
+	"dk.magnusjensen/mymail/packages/shared"
 )
 
 func main() {
@@ -19,7 +21,7 @@ func main() {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, logHandlerOptions))
 
-	authSvc := NewAuthService(logger, "users.json")
+	authSvc := shared.NewAuthService(logger, "users.json")
 
 	listener, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {

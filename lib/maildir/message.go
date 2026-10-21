@@ -102,15 +102,28 @@ func ParseUniqueMeta(metadata string) (*UniqueMeta, error) {
 
 type InfoMeta struct {
 	FormatVersion string
+
+	// Flags
+	Seen bool // Maps to \Seen
+}
+
+func (m *InfoMeta) FlagString() string {
+	flagList := ""
+	if m.Seen {
+		flagList += "S"
+	}
+	return flagList
 }
 
 func (m *InfoMeta) ToFileName() string {
-	return fmt.Sprintf("%s,", m.FormatVersion)
+	flagList := m.FlagString()
+
+	return fmt.Sprintf("%s,%s", m.FormatVersion, flagList)
 }
 
-func ParseInfoMeta(infoMeta string) (*InfoMeta, error) {
+func ParseInfoMeta(infoMetaRaw string) (*InfoMeta, error) {
 	// we expect to not have ':' delim here
-	parts := strings.Split(infoMeta, ",")
+	parts := strings.Split(infoMetaRaw, ",")
 	if len(parts) < 1 {
 		// update once we support more info meta
 		return nil, errors.New("info meta does not carry minimum required fields")
@@ -118,9 +131,20 @@ func ParseInfoMeta(infoMeta string) (*InfoMeta, error) {
 
 	// first part is format version
 	version := parts[0]
-	return &InfoMeta{
+	infoMeta := &InfoMeta{
 		FormatVersion: version,
-	}, nil
+	}
+
+	if len(parts) > 1 {
+		// we have flags present
+		// split each character as it is its own flag
+		for _, flagChar := range parts[1] {
+			if flagChar == 'S' {
+				infoMeta.Seen = true
+			}
+		}
+	}
+	return infoMeta, nil
 }
 
 type MessageMeta struct {

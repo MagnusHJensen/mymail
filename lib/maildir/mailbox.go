@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sync"
 
+	"dk.magnusjensen/mymail/lib/imap"
 	"dk.magnusjensen/mymail/lib/imf"
 )
 
@@ -159,4 +160,38 @@ func (m *Mailbox) ByUID(uid uint32) (message *Message, seq uint32, found bool) {
 		MailboxMessage: foundMessage,
 		Format:         format,
 	}, uint32(i + 1), true
+}
+
+type FlagAction int
+
+const (
+	AddFlagAction = iota
+	RemoveFlagAction
+	ReplaceFlagAction
+)
+
+func (m *Mailbox) UpdateFlags(message *Message, action FlagAction, flagList []string) error {
+	currentName := message.Meta.ToFileName()
+
+	for _, flag := range flagList {
+		switch imap.MessageFlag(flag) {
+		case imap.SeenFlag:
+			if action == AddFlagAction {
+				message.Meta.Info.Seen = true
+			} else if action == RemoveFlagAction {
+				message.Meta.Info.Seen = false
+			} else {
+				return fmt.Errorf("unsupported flag action for \\Seen: %d", action)
+			}
+		default:
+			return fmt.Errorf("unsupported flag passed: %s", flag)
+		}
+	}
+
+	err := os.Rename(path.Join(m.path, "cur", currentName), path.Join(m.path, "cur", message.Meta.ToFileName()))
+	if err != nil {
+		return fmt.Errorf("failed to rename with flag: %w", err)
+	}
+
+	return nil
 }

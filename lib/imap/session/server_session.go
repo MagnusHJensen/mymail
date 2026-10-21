@@ -89,9 +89,8 @@ func (s *imapServerSession) serve() {
 			return
 		}
 
-		// Allow 10 seconds to read each line and process
-		// TODO: handle it per command based on RFC.
-		s.ExtendDeadline(time.Second * 10)
+		// 30 minutes autologout timer RFC9051 §5.4
+		s.ExtendDeadline(time.Minute * 30)
 
 		if failed := s.handleClientCommand(line); failed {
 			return
@@ -174,7 +173,7 @@ func (s *imapServerSession) handleClientCommand(line string) (terminate bool) {
 }
 
 func (s *imapServerSession) handleCapabilities(tag string) (terminate bool) {
-	capabilities := []string{"IMAP4rev2", "LOGINDISABLED"}
+	capabilities := []string{"IMAP4rev2", "IMAP4rev1", "LOGINDISABLED"}
 
 	if !s.conn.isTLSSessionActive {
 		// Advertise STARTTLS
@@ -406,7 +405,7 @@ func (s *imapServerSession) handleFetch(tag, args string, isUIDSequence bool) (t
 		}
 
 		if slices.Contains(messageDataItems, "FLAGS") {
-			fetchTexts = append(fetchTexts, "FLAGS ()")
+			fetchTexts = append(fetchTexts, fmt.Sprintf("FLAGS (%s)", imap.FlagListFromMaildir(message.Meta.Info.FlagString())))
 		}
 
 		if slices.Contains(messageDataItems, "INTERNALDATE") {
@@ -465,6 +464,81 @@ func (s *imapServerSession) handleFetch(tag, args string, isUIDSequence bool) (t
 	return false
 }
 
+func (s *imapServerSession) handleStore(tag, args string, isUID bool) (terminate bool) {
+	if s.state != selectedSessionState {
+		s.Reply(tag, imap.BadCode, "STORE is not allowed in a non selected state")
+		return false
+	}
+
+	parts := strings.SplitN(args, " ", 2)
+	if len(parts) < 2 {
+		s.Reply(tag, imap.BadCode, "invalid number of arguments to STORE")
+		return false
+	}
+
+	sequenceSet := parts[0]
+	//TODO: for now we only support a single number
+	// sequenceSet or UID sequence
+	parsedSequenceSet, err := strconv.ParseUint(sequenceSet, 10, 32)
+	if err != nil {
+		s.Reply(tag, imap.BadCode, "could not parse as a single number, this server only supports a single number for now")
+		return false
+	}
+
+	// A STORE command is always a flag update, it just matter which kind, add, remove, replace and return or silent.
+
+	// fetch the single message for now
+	var message *maildir.Message
+	var found bool
+	if isUID {
+		message, _, found = s.selectedMailbox.ByUID(uint32(parsedSequenceSet))
+		if !found {
+			s.logger.Error("failed to fetch mails by uids", "uids", parsedSequenceSet)
+			return true
+		}
+	} else {
+		message, _, found = s.selectedMailbox.BySeq(uint32(parsedSequenceSet))
+		if !found {
+			s.logger.Error("failed to fetch mails by sequence", "sequence", parsedSequenceSet)
+			return true
+		}
+	}
+
+	// We now know it can only be +FLAGS.SILENT (FLAGS), so remove the +FLAGS.SILENT part
+	flagParts := strings.SplitN(parts[1], " ", 2)
+	flagList := flagParts[1]
+	flagList = strings.TrimLeft(flagList, "(")
+	flagList = strings.TrimRight(flagList, ")")
+
+	flags := strings.Split(flagList, " ")
+	// each flag is "\NAME" format
+
+	flagCmd := flagParts[0]
+	var action maildir.FlagAction
+	switch {
+	case strings.HasPrefix(flagCmd, "+FLAGS.SILENT"):
+		action = maildir.AddFlagAction
+	case strings.HasPrefix(flagCmd, "-FLAGS.SILENT"):
+		action = maildir.RemoveFlagAction
+	default:
+		s.Reply(tag, imap.BadCode, "unsupported flag cmd")
+		return true
+	}
+
+	if err := s.selectedMailbox.UpdateFlags(message, action, flags); err != nil {
+		s.logger.Error("failed to update flags", "err", err)
+		s.Reply(tag, imap.NoCode, "failed to process flag update")
+		return false
+	}
+
+	if !isUID {
+		// If coming from UID, the UID handler will respond to the tag.
+		s.Reply(tag, imap.OkCode, "STORE Completed")
+	}
+
+	return false
+}
+
 func (s *imapServerSession) handleUID(tag, args string) (terminate bool) {
 	if s.state != selectedSessionState {
 		s.Reply(tag, imap.BadCode, "FETCH is not allowed in a non selected state")
@@ -482,6 +556,10 @@ func (s *imapServerSession) handleUID(tag, args string) (terminate bool) {
 	switch parts[0] {
 	case "FETCH":
 		if terminate := s.handleFetch("", strings.Join(parts[1:], " "), true); terminate {
+			return true
+		}
+	case "STORE":
+		if terminate := s.handleStore("", strings.Join(parts[1:], " "), true); terminate {
 			return true
 		}
 	default:
@@ -502,7 +580,7 @@ func (s *imapServerSession) Send(code imap.ResponseCode, args string) error {
 	if args != "" {
 		reply += fmt.Sprintf(" %s", args)
 	}
-	s.ExtendDeadline(time.Second * 10)
+	s.ExtendDeadline(time.Minute * 30)
 	return s.conn.sendRaw(reply)
 }
 
@@ -511,7 +589,7 @@ func (s *imapServerSession) SendNoCode(args string) error {
 		return errors.New("args can not be empty for SendNoCode")
 	}
 
-	s.ExtendDeadline(time.Second * 10)
+	s.ExtendDeadline(time.Minute * 30)
 	return s.conn.sendRaw(fmt.Sprintf("* %s", args))
 }
 
@@ -521,7 +599,7 @@ func (s *imapServerSession) Reply(tag string, code imap.ResponseCode, args strin
 	if args != "" {
 		reply += fmt.Sprintf(" %s", args)
 	}
-	s.ExtendDeadline(time.Second * 10)
+	s.ExtendDeadline(time.Minute * 30)
 	return s.conn.sendRaw(reply)
 }
 
@@ -530,7 +608,7 @@ func (s *imapServerSession) ContinueCommand(args string) error {
 	if args != "" {
 		reply += fmt.Sprintf(" %s", args)
 	}
-	s.ExtendDeadline(time.Second * 10)
+	s.ExtendDeadline(time.Minute * 30)
 	return s.conn.sendRaw(reply)
 }
 
